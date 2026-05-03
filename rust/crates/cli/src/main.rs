@@ -1,36 +1,38 @@
 mod commands;
 pub mod components;
 pub mod debugger_proxy;
+pub mod network;
 mod no_dna;
 mod observability;
 mod output;
 pub mod system;
 pub mod tui;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use owo_colors::OwoColorize;
 use tracing_subscriber::EnvFilter;
 
 use commands::Command;
-use output::OutputFormat;
 use pay_core::{Config, LogFormat};
 
 #[derive(Parser)]
 #[command(
     name = "pay",
     version,
-    about = "The missing payment layer for HTTP.",
     long_about = pay_core::instructions::INSTRUCTIONS,
 )]
 struct Opts {
     #[clap(subcommand)]
-    command: Command,
+    command: Option<Command>,
 
-    /// Automatically satisfy 402 challenges after the user approves a spending
-    /// cap; Pay enforces the cap and stops before the budget can be exceeded.
-    /// Implied when NO_DNA is set.
-    #[arg(long)]
-    yolo: bool,
+    /// Automatically satisfy 402 challenges up to this stablecoin cap.
+    #[arg(
+        long = "yolo-upto",
+        value_name = "AMOUNT",
+        value_parser = parse_stablecoin_cap,
+        hide = true
+    )]
+    yolo_upto: Option<u64>,
 
     /// Sandbox mode: force network=localnet and route to the hosted
     /// Surfpool RPC (https://402.surfnet.dev:8899). Ephemeral wallets
@@ -53,10 +55,10 @@ struct Opts {
     #[arg(long, conflicts_with = "mainnet")]
     local: bool,
 
-    /// Output format for status messages (text or json).
-    /// Defaults to json when NO_DNA is set or stdout is piped.
+    /// Force NO_DNA mode for machine-readable output and non-interactive
+    /// defaults.
     #[arg(long)]
-    output: Option<OutputFormat>,
+    no_dna: bool,
 
     /// Show verbose output (tracing logs, payment details).
     #[arg(short, long)]
@@ -64,7 +66,7 @@ struct Opts {
 
     /// Use a specific named account from `~/.config/pay/accounts.yml`.
     /// For `--local` / `--sandbox`, this selects a wallet within `localnet`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     account: Option<String>,
 
     /// Launch the Payment Debugger proxy on port 1402. All MCP curl
@@ -75,14 +77,31 @@ struct Opts {
 }
 
 fn main() {
-    let opts = Opts::parse();
+    if commands::help::root_overview_help_requested() {
+        if commands::help::args_include_no_dna() {
+            no_dna::enable_for_process();
+        }
+        handle_missing_command();
+        return;
+    }
+
+    let mut opts = parse_opts();
+    if opts.no_dna {
+        no_dna::enable_for_process();
+    }
+
+    let Some(command) = opts.command.take() else {
+        handle_missing_command();
+        return;
+    };
+
     let config = Config::load().unwrap_or_else(|err| {
         eprintln!("{}", format!("Error: {err}").dimmed());
         std::process::exit(1);
     });
 
     // MCP server — needs its own runtime, exit early
-    if matches!(opts.command, Command::Mcp) {
+    if matches!(command, Command::Mcp) {
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -100,7 +119,7 @@ fn main() {
         return;
     }
 
-    let otlp_sidecar = opts.command.otlp_sidecar().map(str::to_owned);
+    let otlp_sidecar = command.otlp_sidecar().map(str::to_owned);
     let _otel_guard = init_logging(config.log_format, opts.verbose, otlp_sidecar.as_deref());
 
     // ── Debugger proxy ─────────────────────────────────────────────────────
@@ -176,8 +195,8 @@ fn main() {
 
     // ── Legacy keypair source for non-payment commands ─────────────────────
     //
-    // `pay account`, `pay send`, `pay solana`, `pay topup`, `pay claude`
-    // and friends still use the original keystore-source-string flow.
+    // `pay topup`, `pay claude`, and friends still use the original
+    // keystore-source-string flow.
     // Payment commands (`pay curl`/`wget`/`fetch`) don't read this — they
     // resolve the wallet via `network_override` + `accounts.yml` instead.
     //
@@ -186,19 +205,20 @@ fn main() {
     // resolves its own ephemeral via the network-aware loader instead.
     let keypair_override: Option<String> = if sandbox_mode
         || matches!(
-            opts.command,
+            command,
             Command::Setup(_)
                 | Command::Account { .. }
                 | Command::Whoami(_)
                 | Command::Skills { .. }
                 | Command::Install(_)
+                | Command::Send(_)
                 | Command::Curl(_)
                 | Command::Wget(_)
                 | Command::Http(_)
                 | Command::Fetch(_)
         ) {
         None
-    } else if matches!(opts.command, Command::Server { .. } | Command::Topup(_)) {
+    } else if matches!(command, Command::Server { .. } | Command::Topup(_)) {
         config.default_active_account_name()
     } else {
         resolve_keypair(&config)
@@ -206,16 +226,17 @@ fn main() {
 
     let is_agent = no_dna::is_agent();
     let is_http_tool = matches!(
-        opts.command,
+        command,
         Command::Curl(_) | Command::Wget(_) | Command::Http(_) | Command::Fetch(_)
     );
     // HTTP tools always auto-pay (Touch ID is the approval gate, not the TUI)
-    let auto_pay = opts.yolo || sandbox_mode || is_agent || is_http_tool || config.auto_pay;
+    let auto_pay =
+        opts.yolo_upto.is_some() || sandbox_mode || is_agent || is_http_tool || config.auto_pay;
 
     // TODO: session budget TUI — skipped for now, not ready.
     let _has_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
 
-    let output_fmt = opts.output;
+    let output_fmt = None;
 
     let verbose = opts.verbose;
 
@@ -224,7 +245,7 @@ fn main() {
     // `pay setup` first so the user lands in the wizard instead of a
     // cryptic "no account configured" error mid-flight. Sandbox flows
     // generate ephemeral wallets on first use, so they're exempt.
-    if opts.command.requires_account() && !sandbox_mode && !has_any_account() {
+    if command.requires_account() && !sandbox_mode && !has_any_account() {
         eprintln!(
             "{}",
             "No pay account configured — running `pay setup` first…".dimmed()
@@ -242,9 +263,10 @@ fn main() {
         }
     }
 
-    if let Err(err) = opts.command.execute(
+    if let Err(err) = command.execute(
         auto_pay,
         output_fmt,
+        opts.yolo_upto,
         keypair_override.as_deref(),
         network_override.as_deref(),
         opts.account.as_deref(),
@@ -253,16 +275,111 @@ fn main() {
     ) {
         if no_dna::should_json(output_fmt) {
             output::error_json(&err.to_string());
-        } else if let pay_core::Error::PaymentRejected(detail) = &err {
-            eprintln!(
-                "{}",
-                components::notice(components::NoticeLevel::Warning, "Payment rejected", detail,)
-            );
         } else {
-            eprintln!("{}", format!("Error: {err}").dimmed());
+            print_command_error(&err);
         }
         std::process::exit(1);
     }
+}
+
+fn print_command_error(err: &pay_core::Error) {
+    match err {
+        pay_core::Error::PaymentRejected(detail) => {
+            components::print_notice(components::NoticeLevel::Warning, "Payment rejected", detail);
+        }
+        pay_core::Error::Config(message) => {
+            components::print_notice(
+                components::NoticeLevel::Error,
+                "Configuration error",
+                message,
+            );
+        }
+        _ => {
+            components::print_notice(components::NoticeLevel::Error, "Error", &err.to_string());
+        }
+    }
+}
+
+fn handle_missing_command() {
+    let mut command = Opts::command();
+    commands::help::configure(&mut command, !no_dna::is_agent(), true);
+
+    if no_dna::is_agent() {
+        if let Err(err) = output::print_json(&commands::help::command_catalog(&command)) {
+            output::error_json(&err.to_string());
+            std::process::exit(1);
+        }
+    } else {
+        commands::help::print_root_overview();
+    }
+}
+
+fn parse_opts() -> Opts {
+    let no_dna_requested = no_dna::is_agent() || commands::help::args_include_no_dna();
+    let mut command = Opts::command();
+    commands::help::configure(&mut command, !no_dna_requested, true);
+    let matches = command.get_matches();
+    Opts::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
+}
+
+fn parse_stablecoin_cap(input: &str) -> Result<u64, String> {
+    let trimmed = input.trim();
+    let without_symbol = trimmed.strip_prefix('$').unwrap_or(trimmed).trim();
+    let without_suffix = without_symbol
+        .strip_suffix("USDC")
+        .or_else(|| without_symbol.strip_suffix("usdc"))
+        .unwrap_or(without_symbol)
+        .trim();
+
+    parse_decimal_micro_units(without_suffix)
+        .and_then(|cap| {
+            if cap == 0 {
+                Err("cap must be greater than 0".to_string())
+            } else {
+                Ok(cap)
+            }
+        })
+        .map_err(|err| format!("invalid stablecoin cap `{input}`: {err}"))
+}
+
+fn parse_decimal_micro_units(input: &str) -> Result<u64, String> {
+    if input.is_empty() {
+        return Err("amount must not be empty".to_string());
+    }
+    if input.starts_with('-') {
+        return Err("amount must be positive".to_string());
+    }
+
+    let mut parts = input.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || fraction.len() > 6
+    {
+        return Err("use a decimal amount with at most 6 decimal places".to_string());
+    }
+
+    let whole_units = whole
+        .parse::<u64>()
+        .map_err(|_| "amount is too large".to_string())?
+        .checked_mul(1_000_000)
+        .ok_or_else(|| "amount is too large".to_string())?;
+
+    let mut fraction_units = 0u64;
+    for (index, byte) in fraction.bytes().enumerate() {
+        let digit = (byte - b'0') as u64;
+        let place = 10_u64.pow(5 - index as u32);
+        fraction_units = fraction_units
+            .checked_add(digit * place)
+            .ok_or_else(|| "amount is too large".to_string())?;
+    }
+
+    whole_units
+        .checked_add(fraction_units)
+        .ok_or_else(|| "amount is too large".to_string())
 }
 
 /// True if any pay account exists on disk (any network, any name).
@@ -360,6 +477,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn account_global_flag_can_follow_push_alias() {
+        let opts =
+            Opts::try_parse_from(["pay", "push", "--account", "test", "max", "ludo"]).unwrap();
+
+        assert_eq!(opts.account.as_deref(), Some("test"));
+        match opts.command {
+            Some(Command::Send(cmd)) => {
+                assert_eq!(cmd.amount, "max");
+                assert_eq!(cmd.recipient, "ludo");
+            }
+            _ => panic!("expected send command"),
+        }
+    }
+
+    #[test]
     fn format_cap_less_than_one() {
         assert_eq!(format_cap(500_000), "0.50"); // 0.5 USDC
     }
@@ -377,6 +509,21 @@ mod tests {
     #[test]
     fn format_cap_zero() {
         assert_eq!(format_cap(0), "0.00");
+    }
+
+    #[test]
+    fn parse_stablecoin_cap_accepts_decimal_inputs() {
+        assert_eq!(parse_stablecoin_cap("1").unwrap(), 1_000_000);
+        assert_eq!(parse_stablecoin_cap("$1.25").unwrap(), 1_250_000);
+        assert_eq!(parse_stablecoin_cap("0.000001 USDC").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_stablecoin_cap_rejects_invalid_inputs() {
+        assert!(parse_stablecoin_cap("0").is_err());
+        assert!(parse_stablecoin_cap("-1").is_err());
+        assert!(parse_stablecoin_cap("1.0000001").is_err());
+        assert!(parse_stablecoin_cap("abc").is_err());
     }
 
     #[test]

@@ -11,12 +11,12 @@ pub struct NewCommand {
     pub name: String,
 
     /// Storage backend: "keychain" (macOS), "gnome-keyring" (Linux),
-    /// "windows-hello" (Windows), "1password".
+    /// or "windows-hello" (Windows).
     #[arg(long)]
     pub backend: Option<String>,
 
-    /// 1Password vault name.
-    #[arg(long)]
+    /// Legacy vault name.
+    #[arg(long, hide = true)]
     pub vault: Option<String>,
 
     /// Replace existing account.
@@ -218,13 +218,13 @@ fn build_keystore(
 /// Used in error messages so we don't suggest `keychain` to a Linux user.
 fn available_backends_hint() -> &'static str {
     if cfg!(target_os = "macos") {
-        "'keychain' or '1password'"
+        "'keychain'"
     } else if cfg!(target_os = "linux") {
-        "'gnome-keyring' or '1password'"
+        "'gnome-keyring'"
     } else if cfg!(target_os = "windows") {
-        "'windows-hello' or '1password'"
+        "'windows-hello'"
     } else {
-        "'1password'"
+        "a supported platform backend"
     }
 }
 
@@ -287,43 +287,39 @@ pub fn pick_backend() -> pay_core::Result<String> {
         label: String,
     }
 
-    let mut options = Vec::new();
-
     // Only show platform-native backend on the current OS
     #[cfg(target_os = "macos")]
-    options.push(Opt {
+    let options = [Opt {
         id: "keychain",
         label: "macOS Keychain (Touch ID)".into(),
-    });
+    }];
 
     #[cfg(target_os = "linux")]
-    {
-        let gnome_available = Keystore::gnome_keyring_available();
-        if gnome_available {
-            options.push(Opt {
+    let options = {
+        if Keystore::gnome_keyring_available() {
+            vec![Opt {
                 id: "gnome-keyring",
                 label: "GNOME Keyring (password prompt)".into(),
-            });
+            }]
+        } else {
+            Vec::new()
         }
-    }
+    };
 
     #[cfg(target_os = "windows")]
-    {
-        let wh_available = Keystore::windows_hello_available();
-        if wh_available {
-            options.push(Opt {
+    let options = {
+        if Keystore::windows_hello_available() {
+            vec![Opt {
                 id: "windows-hello",
                 label: "Windows Hello (fingerprint / face / PIN)".into(),
-            });
+            }]
+        } else {
+            Vec::new()
         }
-    }
+    };
 
-    if Keystore::onepassword_available() {
-        options.push(Opt {
-            id: "1password",
-            label: "1Password".into(),
-        });
-    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let options: Vec<Opt> = Vec::new();
 
     if options.is_empty() {
         return Err(pay_core::Error::Config(
@@ -401,20 +397,22 @@ pub fn print_next_steps(
         eprintln!("  {}", "$ pay claude".bold());
         eprintln!("  {}", "$ pay codex".bold());
     } else {
-        let topup_cmd = if name == "default" {
-            "pay topup".to_string()
-        } else {
-            format!("pay topup --account {name}")
-        };
         eprintln!();
-        eprintln!(
-            "  {}",
-            "A top-up is required before making paid requests.".dimmed()
+        crate::components::print_notice(
+            crate::components::NoticeLevel::Warning,
+            "Top-up required",
+            &topup_required_body(name),
         );
-        eprintln!("  {}", format!("When ready, run: $ {topup_cmd}").dimmed());
     }
 
     eprintln!();
+}
+
+fn topup_required_body(name: &str) -> String {
+    format!(
+        "A top-up is required before making paid requests.\n$ {}",
+        crate::commands::topup::topup_retry_command(name)
+    )
 }
 
 pub fn format_received(r: &pay_core::client::balance::ReceivedFunds) -> String {
@@ -441,4 +439,25 @@ pub fn generate_keypair() -> (Vec<u8>, String) {
 
     let pubkey_b58 = bs58::encode(&verifying_key.to_bytes()).into_string();
     (keypair_bytes, pubkey_b58)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topup_required_body_uses_default_topup_command_for_default_account() {
+        assert_eq!(
+            topup_required_body("default"),
+            "A top-up is required before making paid requests.\n$ pay topup"
+        );
+    }
+
+    #[test]
+    fn topup_required_body_uses_named_account_topup_command() {
+        assert_eq!(
+            topup_required_body("test-2"),
+            "A top-up is required before making paid requests.\n$ pay topup --account test-2"
+        );
+    }
 }

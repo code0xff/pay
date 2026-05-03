@@ -2,6 +2,7 @@
 //!
 //! Thin wrapper around `solana_mpp` for challenge detection and credential building.
 
+use pay_types::Stablecoin;
 use solana_mpp::client::build_credential_header;
 use solana_mpp::protocol::solana::default_rpc_url;
 use solana_mpp::solana_keychain::SolanaSigner;
@@ -66,9 +67,17 @@ pub fn build_credential(
         .map_err(|e| Error::Mpp(format!("Failed to decode challenge request: {e}")))?;
 
     let amount = format_amount(&request.amount, &request.currency);
-    let desc = crate::client::prompt::payment_description(
-        challenge.description.as_deref(),
+    let prompt_context = crate::client::prompt::payment_prompt_context(
+        charge_prompt_reason(
+            request.description.as_deref(),
+            challenge.description.as_deref(),
+        ),
         &[resource_url],
+    );
+    let intent = crate::keystore::AuthIntent::authorize_payment_details(
+        &amount,
+        &prompt_context.reason,
+        &prompt_context.operator,
     );
 
     let challenge_network = request
@@ -99,19 +108,17 @@ pub fn build_credential(
     // The `surfnet_setTokenAccount` cheatcode is required to properly
     // initialize token accounts in surfpool's local state; JIT-fetched
     // accounts from mainnet are read-only and fail simulation.
-    let is_surfpool_challenge =
-        embedded_blockhash.is_some_and(|h| h.starts_with(SURFPOOL_BLOCKHASH_PREFIX));
-    let user_opted_into_sandbox = network_override.is_some() || is_surfpool_challenge;
+    let user_opted_into_sandbox = should_auto_fund_surfpool(network_override, embedded_blockhash);
     let network = network_override
         .map(str::to_string)
         .unwrap_or(challenge_network);
 
-    let (signer, ephemeral_notice) = crate::signer::load_signer_for_network_payment(
+    let (signer, ephemeral_notice) = crate::signer::load_signer_for_network_payment_with_intent(
         &network,
         store,
         account_override,
         &amount,
-        &desc,
+        &intent,
     )?;
 
     let rpc_url = resolve_rpc_url(&network, embedded_blockhash);
@@ -265,15 +272,10 @@ fn decoded_charge_candidates(
         let network = network_override
             .map(str::to_string)
             .unwrap_or(challenge_network);
-        let is_surfpool_challenge = details
-            .recent_blockhash
-            .as_deref()
-            .is_some_and(|h| h.starts_with(SURFPOOL_BLOCKHASH_PREFIX));
-        let mint = solana_mpp::protocol::solana::resolve_stablecoin_mint(
-            &request.currency,
-            Some(&network),
-        )
-        .map(str::to_string);
+        let mint = resolve_challenge_mint(&request.currency, &network);
+        let embedded_blockhash = details.recent_blockhash;
+        let user_opted_into_sandbox =
+            should_auto_fund_surfpool(network_override, embedded_blockhash.as_deref());
 
         candidates.push(DecodedChargeCandidate {
             index,
@@ -284,12 +286,26 @@ fn decoded_charge_candidates(
             currency: request.currency,
             mint,
             network,
-            embedded_blockhash: details.recent_blockhash,
-            user_opted_into_sandbox: network_override.is_some() || is_surfpool_challenge,
+            embedded_blockhash,
+            user_opted_into_sandbox,
         });
     }
 
     Ok(candidates)
+}
+
+fn resolve_challenge_mint(currency: &str, network: &str) -> Option<String> {
+    if currency.eq_ignore_ascii_case("SOL") {
+        return None;
+    }
+    if let Some(stablecoin) = Stablecoin::parse_symbol(currency) {
+        return Some(stablecoin.mint(Some(network)).to_string());
+    }
+    if Stablecoin::from_mint(currency).is_some() {
+        return Some(currency.to_string());
+    }
+    solana_mpp::protocol::solana::resolve_stablecoin_mint(currency, Some(network))
+        .map(str::to_string)
 }
 
 fn select_candidate_index_for_balances(
@@ -349,6 +365,25 @@ fn normalize_network(network: &str) -> &str {
         "mainnet-beta" => "mainnet",
         other => other,
     }
+}
+
+fn should_auto_fund_surfpool(
+    network_override: Option<&str>,
+    embedded_blockhash: Option<&str>,
+) -> bool {
+    network_override.is_some_and(is_sandbox_network)
+        || embedded_blockhash.is_some_and(|hash| hash.starts_with(SURFPOOL_BLOCKHASH_PREFIX))
+}
+
+fn is_sandbox_network(network: &str) -> bool {
+    matches!(normalize_network(network), "localnet" | "sandbox")
+}
+
+fn charge_prompt_reason<'a>(
+    request_description: Option<&'a str>,
+    challenge_description: Option<&'a str>,
+) -> Option<&'a str> {
+    request_description.or(challenge_description)
 }
 
 /// Base58 prefix that the Surfpool sandbox embeds in every blockhash it
@@ -422,8 +457,10 @@ fn format_amount(amount: &str, currency: &str) -> String {
 fn format_value(v: f64) -> String {
     if v == 0.0 {
         "0".to_string()
-    } else if v >= 0.01 {
+    } else if v >= 0.01 && is_cent_exact(v) {
         format!("{v:.2}")
+    } else if v >= 0.01 {
+        format_precise_value(v, 6)
     } else if v >= 0.001 {
         format!("{v:.3}")
     } else if v >= 0.0001 {
@@ -431,6 +468,19 @@ fn format_value(v: f64) -> String {
     } else {
         format!("{v:.6}")
     }
+}
+
+fn is_cent_exact(v: f64) -> bool {
+    let rounded_to_cent = (v * 100.0).round() / 100.0;
+    (v - rounded_to_cent).abs() < 0.0000005
+}
+
+fn format_precise_value(v: f64, decimals: usize) -> String {
+    let mut value = format!("{v:.decimals$}");
+    while value.contains('.') && value.ends_with('0') {
+        value.pop();
+    }
+    value
 }
 
 #[cfg(test)]
@@ -445,6 +495,11 @@ mod tests {
     #[test]
     fn format_value_large() {
         assert_eq!(format_value(1.5), "1.50");
+    }
+
+    #[test]
+    fn format_value_preserves_fractional_cent_fees() {
+        assert_eq!(format_value(1.0015), "1.0015");
     }
 
     #[test]
@@ -471,6 +526,11 @@ mod tests {
     fn format_amount_usdc() {
         // 1000000 = 1.0 USDC
         assert_eq!(format_amount("1000000", "USDC"), "$1.00");
+    }
+
+    #[test]
+    fn format_amount_usdc_with_fee_fraction() {
+        assert_eq!(format_amount("1001500", "USDC"), "$1.0015");
     }
 
     #[test]
@@ -570,6 +630,28 @@ mod tests {
 
         let selected = select_candidate_index_for_balances(&candidates, &balances).unwrap();
         assert_eq!(candidates[selected].currency, "USDT");
+    }
+
+    #[test]
+    fn balance_selector_resolves_usdg_symbol_to_supported_mint() {
+        let challenges = vec![challenge_for_currency("USDG", "1000000")];
+        let candidates = decoded_charge_candidates(&challenges, None).unwrap();
+        let balances = crate::client::balance::AccountBalances {
+            sol_lamports: 0,
+            tokens: vec![token_balance(
+                pay_types::stablecoin_mints::USDG_MAINNET,
+                1_000_000,
+                "USDG",
+            )],
+            tokens_unavailable: false,
+        };
+
+        let selected = select_candidate_index_for_balances(&candidates, &balances).unwrap();
+        assert_eq!(candidates[selected].currency, "USDG");
+        assert_eq!(
+            candidates[selected].mint.as_deref(),
+            Some(pay_types::stablecoin_mints::USDG_MAINNET)
+        );
     }
 
     #[test]
@@ -798,12 +880,20 @@ mod tests {
         "9zrUHnA1nCByPksy3aL8tQ47vqdaG2vnFs4HrxgcZj4F"
     }
 
-    /// Helper: compute `user_opted_into_sandbox` using the same logic as
-    /// `build_credential`.
     fn is_sandbox(network_override: Option<&str>, embedded_blockhash: Option<&str>) -> bool {
-        let is_surfpool_challenge =
-            embedded_blockhash.is_some_and(|h| h.starts_with(SURFPOOL_BLOCKHASH_PREFIX));
-        network_override.is_some() || is_surfpool_challenge
+        should_auto_fund_surfpool(network_override, embedded_blockhash)
+    }
+
+    #[test]
+    fn charge_prompt_reason_prefers_request_description() {
+        assert_eq!(
+            charge_prompt_reason(Some("Send 1 USDC to address abc"), Some("API access")),
+            Some("Send 1 USDC to address abc")
+        );
+        assert_eq!(
+            charge_prompt_reason(None, Some("API access")),
+            Some("API access")
+        );
     }
 
     /// Helper: compute RPC URL using the same logic as `build_credential`.
@@ -833,9 +923,8 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_detected_with_mainnet_flag() {
-        // --mainnet also sets network_override
-        assert!(is_sandbox(Some("mainnet"), None));
+    fn sandbox_not_detected_with_mainnet_flag() {
+        assert!(!is_sandbox(Some("mainnet"), None));
     }
 
     #[test]
