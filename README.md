@@ -12,10 +12,10 @@ Wrap your CLI (`curl`, `claude`, `codex`, etc.) -- when a stablecoin-gated API r
 
 ```sh
 # Without pay — you get a 402
-curl https://payment-debugger.vercel.app/mpp/quote/AAPL
+curl https://debugger.pay.sh/mpp/quote/AAPL
 
 # With pay -- it handles the 402 challenge and returns the response
-pay --sandbox curl https://payment-debugger.vercel.app/mpp/quote/AAPL
+pay --sandbox curl https://debugger.pay.sh/mpp/quote/AAPL
 ```
 
 ## Key Features
@@ -65,7 +65,7 @@ pay server start --debugger spec.yml
 pay server demo
 ```
 
-A [public debugger](https://payment-debugger.vercel.app) is also available.
+A [public debugger](https://debugger.pay.sh) is also available.
 
 ### 🔐 Secure Key Storage
 
@@ -112,7 +112,7 @@ pay --version
 pay setup
 
 # 2. Make a paid API call (--sandbox uses an ephemeral funded keypair)
-pay --sandbox curl https://payment-debugger.vercel.app/mpp/quote/AAPL
+pay --sandbox curl https://debugger.pay.sh/mpp/quote/AAPL
 
 # 3. Or let your AI agent handle it
 pay --sandbox claude
@@ -145,5 +145,4 @@ This grants `pay` the right to prompt for your password or fingerprint before ac
 
 MIT — see [LICENSE](./LICENSE).
 
-Subject to the foregoing, the Terms of Service available at solana.com/tos
-
+Subject to the foregoing, the Terms of Service available at [solana.com/tos](https://solana.com/tos)
