@@ -7,6 +7,11 @@ pub mod keystore;
 pub mod signer;
 pub mod skills;
 
+// EVM chain abstraction — gated behind the `evm` Cargo feature so the
+// Solana-only build pulls zero alloy / x402-chain-eip155 transitive crates.
+#[cfg(feature = "evm")]
+pub mod chain;
+
 // Client modules (CLI)
 pub mod client;
 

@@ -89,6 +89,8 @@ hex               = { workspace = true, optional = true }
 //! module is only used by the x402 multi-chain dispatch path.
 
 use crate::{Error, Result};
+// `with_chain_id` lives on alloy's `Signer` trait, not the PrivateKeySigner struct.
+use alloy::signers::Signer;
 
 // ── ChainFamily ──────────────────────────────────────────────────────────────
 
@@ -161,40 +163,23 @@ impl ChainFamily {
 
 // ── ChainSigner trait ────────────────────────────────────────────────────────
 
-/// Unified signing interface for Solana (ed25519) and EVM (secp256k1).
+/// Unified signing interface used by the x402 multi-chain dispatch path.
 ///
-/// Used exclusively by the x402 multi-chain dispatch path.
-/// The existing `MemorySigner` / `SolanaSigner` interfaces are unchanged.
+/// Today this is implemented only for EVM (`EvmChainSigner`). The Solana
+/// payment path in x402 reuses the existing `solana-x402` SDK directly,
+/// so wrapping `MemorySigner` here would be unused indirection. If a
+/// Solana implementation is needed later, add it then — `solana_keychain::
+/// SolanaSigner` is async-only so the trait method here would need to
+/// become `async fn` (or block on a runtime).
 pub trait ChainSigner: Send + Sync {
     /// Sign a raw message (already hashed if needed by the scheme).
     fn sign_raw(&self, message: &[u8]) -> Vec<u8>;
 
-    /// Public address — Base58 pubkey for Solana, 0x-hex for EVM.
+    /// Public address — 0x-hex for EVM.
     fn address(&self) -> String;
 
     /// Which chain this signer operates on.
     fn chain_family(&self) -> ChainFamily;
-}
-
-// ── SolanaChainSigner ────────────────────────────────────────────────────────
-
-/// Wraps `MemorySigner` behind `ChainSigner` without changing any Solana code.
-pub struct SolanaChainSigner(pub solana_mpp::solana_keychain::MemorySigner);
-
-impl ChainSigner for SolanaChainSigner {
-    fn sign_raw(&self, message: &[u8]) -> Vec<u8> {
-        use solana_mpp::solana_keychain::SolanaSigner;
-        self.0.sign(message).to_vec()
-    }
-
-    fn address(&self) -> String {
-        use solana_mpp::solana_keychain::SolanaSigner;
-        self.0.pubkey().to_string()
-    }
-
-    fn chain_family(&self) -> ChainFamily {
-        ChainFamily::Solana
-    }
 }
 
 // ── EvmChainSigner ───────────────────────────────────────────────────────────

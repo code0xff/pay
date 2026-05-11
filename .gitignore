@@ -2,6 +2,7 @@
 .vscode
 .DS_Store
 .omc
+.nightcrow
 
 # TypeScript
 node_modules
