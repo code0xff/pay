@@ -14,6 +14,11 @@ network_tests = []
 # Activates openssl-sys/vendored which is pulled in transitively by
 # solana-rpc-client → reqwest → native-tls → openssl-sys.
 vendored-openssl = ["openssl-sys/vendored"]
+# Opt-in EVM (Ethereum / Base / Optimism / Arbitrum / Sepolia / Holesky /
+# Base-Sepolia) support. Pulls in alloy + x402-chain-eip155. Solana-only
+# users should leave this off; the entire Solana code path compiles
+# identically with `evm` off.
+evm = ["dep:alloy", "dep:x402-chain-eip155", "dep:hex"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
@@ -54,6 +59,11 @@ solana-pubkey = { workspace = true }
 solana-signature = { workspace = true }
 solana-system-interface = { workspace = true }
 solana-transaction = { workspace = true }
+
+# EVM (opt-in; activated by the `evm` feature)
+alloy             = { workspace = true, optional = true }
+x402-chain-eip155 = { workspace = true, optional = true }
+hex               = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_yml = { workspace = true }

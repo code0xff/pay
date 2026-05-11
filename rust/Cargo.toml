@@ -122,5 +122,17 @@ solana-signature = "3.2"
 solana-system-interface = "2.0"
 solana-transaction = "3.1"
 
+# EVM (opt-in via pay-core's `evm` feature; not pulled into the build graph
+# until a member crate marks the dep as activated).
+alloy = { version = "1.7.3", features = [
+    "signer-local",
+    "provider-http",
+    "eip712",
+    "sol-types",
+    "rpc-types",
+] }
+x402-chain-eip155 = "1.4.4"
+hex = "0.4"
+
 # [patch."https://github.com/solana-foundation/mpp-sdk"]
 # solana-mpp = { path = "../../mpp-sdk/rust" }

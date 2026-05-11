@@ -26,6 +26,23 @@ x402 프로토콜에서 Solana와 Ethereum(EVM)을 동시 지원한다.
 
 ---
 
+## Cargo feature flag: `evm` (opt-in)
+
+EVM 지원은 **`evm` feature flag 뒤에 분리**되어 있으며 기본값은 **off**다. Solana-only 사용자는 alloy / x402-chain-eip155 의존성 비용을 부담하지 않는다.
+
+- **Feature 정의**: `rust/crates/core/Cargo.toml`의 `[features]` 블록 (`evm = ["dep:alloy", "dep:x402-chain-eip155", "dep:hex"]`)
+- **CLI 재노출**: `rust/crates/cli/Cargo.toml`의 `evm = ["pay-core/evm"]`
+- **활성화 방법**: `cargo build --features evm` (워크스페이스 빌드 시 `--features pay/evm`)
+- **검증**: `cargo tree -p pay-core | grep -c alloy` → 반드시 `0` (기본 빌드)
+
+Phase 1~5는 모두 동일한 `evm` flag 아래 단계적으로 진행하여, 반쯤 구현된 EVM 스택이 비활성 빌드에 노출되지 않는다. Phase별 feature 상호작용은 각 phase 문서의 `### N.0 Feature flag interaction` 섹션 참조.
+
+비활성 빌드에서 EVM 네트워크 슬러그를 입력하면 다음 에러를 반환한다:
+```
+Network `ethereum` requires EVM support, but this `pay` build does not include
+it. Rebuild with `cargo build --features evm`.
+```
+
 ## 추가 의존성 (rust/Cargo.toml workspace)
 
 ```toml
@@ -40,12 +57,16 @@ alloy = { version = "1.7.3", features = [
     "sol-types",      # compile-time ABI/EIP-712 타입
     "rpc-types",      # Ethereum RPC 타입
 ] }
+
+# EVM 키 hex 인코딩 (EvmChainSigner::to_hex_key)
+hex = "0.4"
 ```
 
-`pay-core/Cargo.toml`에도 동일하게 추가:
+`pay-core/Cargo.toml`에는 `optional = true`로 추가하여 `evm` feature가 켜질 때만 빌드 그래프에 포함시킨다:
 ```toml
-alloy          = { workspace = true }
-x402-chain-eip155 = { workspace = true }
+alloy             = { workspace = true, optional = true }
+x402-chain-eip155 = { workspace = true, optional = true }
+hex               = { workspace = true, optional = true }
 ```
 
 ---

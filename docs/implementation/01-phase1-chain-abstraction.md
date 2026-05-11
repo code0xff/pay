@@ -7,6 +7,40 @@ ed25519(Solana)와 secp256k1(EVM) 서명을 동일한 인터페이스로 다룰 
 
 ---
 
+## 1.0 Cargo feature flag (precondition)
+
+Phase 1을 시작하기 전에 **`evm` feature가 `pay-core`에 정의되어 있어야 한다** (Gate G2에서 처리). 이는 Phase 1~5 전체의 사전조건이며, EVM 의존성은 `evm` feature가 켜질 때만 빌드 그래프에 포함된다.
+
+**Gate G2에서 정비된 상태:**
+- `rust/Cargo.toml`의 `[workspace.dependencies]`에 `alloy`, `x402-chain-eip155`, `hex` 항목이 존재한다.
+- `rust/crates/core/Cargo.toml`의 `[features]`에 `evm = ["dep:alloy", "dep:x402-chain-eip155", "dep:hex"]`가 존재하고, 세 의존성은 `optional = true`로 선언되어 있다.
+- `rust/crates/cli/Cargo.toml`의 `[features]`에 `evm = ["pay-core/evm"]`가 존재한다.
+
+**Phase 1에서 추가로 처리할 gating:**
+- `chain.rs` 자체는 내부에 `#[cfg]` 표기 없이 무조건적으로 작성한다(모듈 자체가 gated되므로).
+- `rust/crates/core/src/lib.rs`에서 `pub mod chain;` 선언은 **모듈 선언 라인에 feature gate를 붙인다**:
+  ```rust
+  #[cfg(feature = "evm")]
+  pub mod chain;
+  ```
+
+**검증** (Phase 1 작성 후):
+```bash
+cd rust
+
+# alloy가 기본 빌드 dep 트리에 들어가지 않는지 확인
+cargo tree -p pay-core | grep -c alloy            # → 0
+
+# 기본 빌드는 chain 모듈 없이 통과
+cargo build
+
+# EVM 활성 시 chain 모듈이 컴파일됨
+cargo build --features evm
+cargo test -p pay-core --features evm chain
+```
+
+---
+
 ## 수정 파일
 
 ### 1. `rust/Cargo.toml` — 의존성 추가
@@ -15,7 +49,7 @@ ed25519(Solana)와 secp256k1(EVM) 서명을 동일한 인터페이스로 다룰 
 [workspace.dependencies]
 # 기존 유지 ...
 
-# [신규] EVM 지원
+# [신규] EVM 지원 (G2에서 정비됨, optional은 pay-core에서 처리)
 alloy = { version = "1.7.3", features = [
     "signer-local",
     "provider-http",
@@ -24,17 +58,23 @@ alloy = { version = "1.7.3", features = [
     "rpc-types",
 ] }
 x402-chain-eip155 = "1.4.4"
+hex = "0.4"
 ```
 
-### 2. `rust/crates/core/Cargo.toml` — 크레이트 의존성 추가
+### 2. `rust/crates/core/Cargo.toml` — 크레이트 의존성 추가 (optional)
 
 ```toml
+[features]
+# 기존 유지 ...
+evm = ["dep:alloy", "dep:x402-chain-eip155", "dep:hex"]
+
 [dependencies]
 # 기존 유지 ...
 
-# [신규]
-alloy          = { workspace = true }
-x402-chain-eip155 = { workspace = true }
+# [신규] — optional = true 로 선언, `evm` feature가 활성화되면 자동으로 빌드 그래프에 추가됨
+alloy             = { workspace = true, optional = true }
+x402-chain-eip155 = { workspace = true, optional = true }
+hex               = { workspace = true, optional = true }
 ```
 
 ---
@@ -272,13 +312,16 @@ pub mod keystore;
 pub mod signer;
 pub mod skills;
 
-// [신규]
-pub mod chain;   // ← 추가
+// [신규] — `evm` feature가 켜졌을 때만 컴파일됨
+#[cfg(feature = "evm")]
+pub mod chain;
 
 pub mod client;
 pub mod server;
 // ...
 ```
+
+이렇게 모듈 선언 라인에만 `#[cfg(feature = "evm")]`를 붙이면 `chain.rs` 본문에는 내부 `cfg` 표기가 전혀 필요 없다(파일 자체가 통째로 gated됨).
 
 ---
 

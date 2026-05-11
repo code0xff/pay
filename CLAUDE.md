@@ -154,6 +154,9 @@ bs58 = "0.5"
 ```
 
 ### 추가 예정 (EVM)
+
+다음 의존성은 `evm` feature가 활성화되었을 때만 빌드 그래프에 추가된다(`pay-core/Cargo.toml`에서 `optional = true`로 선언):
+
 ```toml
 # EVM x402 공식 크레이트 (Coinbase)
 x402-chain-eip155 = "1.4.4"
@@ -218,6 +221,50 @@ just lint
 
 # 로컬 실행
 cargo run -- --sandbox curl https://debugger.pay.sh/mpp/quote/AAPL
+```
+
+---
+
+## Cargo feature flags
+
+`pay`는 멀티체인 지원을 Cargo feature 플래그로 분리한다.
+
+| Feature        | 기본값 | 활성화하는 것 |
+|----------------|--------|-------------|
+| `evm`          | off    | alloy + x402-chain-eip155, ChainSigner EVM 분기, `client::evm`, balance EVM 조회, EVM 계정 생성 |
+| `server`       | off    | pay-core 서버 미들웨어 (axum) |
+| `gcp_kms`      | off    | Google Cloud KMS 키스토어 백엔드 |
+| `vendored-openssl` | off | OpenSSL vendored 빌드 (cross-compile용) |
+| `network_tests`| off    | 네트워크 의존 통합 테스트 |
+
+### 사용 예시
+
+```bash
+# Solana 전용 (기본) — alloy 의존성 없음
+cargo build
+
+# EVM 활성화 — Ethereum, Base, Optimism, Arbitrum, Sepolia, Holesky, Base-Sepolia 지원
+cargo build --features evm
+
+# 워크스페이스 빌드 시 pay (CLI)에 EVM 활성화
+cargo build --workspace --features pay/evm
+
+# 테스트: EVM 경로 포함
+cargo test --features evm
+```
+
+### 설계 원칙
+
+1. **Solana 경로는 모든 feature 조합에서 동일하게 컴파일된다.** `evm` 플래그는 Solana 코드를 건드리지 않는다.
+2. **EVM 코드는 단일 진입점을 거친다.** `#[cfg(feature = "evm")]`는 모듈 선언과 dispatch arm에만 붙고, 비즈니스 로직 내부에는 붙지 않는다.
+3. **`evm` 비활성 빌드에서 EVM 네트워크 슬러그 입력 시 명확한 에러 반환** — `"Network 'ethereum' requires EVM support. Rebuild with --features evm."`
+4. **`solana` feature는 존재하지 않는다.** Solana는 무조건 컴파일된다 — EVM-only `pay` 빌드 사용 사례가 없기 때문.
+
+### 의존성 게이팅 확인
+
+```bash
+# 기본 빌드에 alloy가 없어야 함 (반드시 0)
+cargo tree -p pay-core | grep -c alloy
 ```
 
 ---

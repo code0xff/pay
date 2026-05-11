@@ -12,6 +12,9 @@ path = "src/main.rs"
 default = []
 gcp_kms = ["solana-mpp/gcp_kms"]
 vendored-openssl = ["pay-core/vendored-openssl"]
+# Re-export pay-core's `evm` feature. From the workspace root,
+# `cargo build --features evm` activates EVM in the CLI binary.
+evm = ["pay-core/evm"]
 
 [dependencies]
 axum = { workspace = true }
