@@ -131,7 +131,10 @@ alloy = { version = "1.7.3", features = [
     "sol-types",
     "rpc-types",
 ] }
-x402-chain-eip155 = "1.4.4"
+x402-chain-eip155 = { version = "1.4", default-features = false, features = [
+    "client",
+] }
+x402-types = "1.4"
 hex = "0.4"
 
 # [patch."https://github.com/solana-foundation/mpp-sdk"]

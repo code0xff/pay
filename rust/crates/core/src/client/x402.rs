@@ -31,7 +31,14 @@ pub use solana_x402::{SIGN_IN_WITH_X_HEADER, X402_V1_PAYMENT_HEADER, X402_V2_PAY
 #[derive(Debug, Clone)]
 pub struct Challenge {
     pub x402_version: u64,
+    /// The currently-selected `PaymentRequirements` entry. For Solana-only
+    /// challenges this is the Solana entry; for multi-chain challenges it's
+    /// the parser's default pick (Solana mainnet) — `build_payment` may
+    /// re-pick from `all_accepts` based on the configured wallet.
     pub requirements: PaymentRequirements,
+    /// Full `accepts` array from the server's envelope. Used by
+    /// `select_best_chain` to dispatch to the right chain family.
+    pub all_accepts: Vec<PaymentRequirements>,
     pub siwx: Option<SiwxExtension>,
 }
 
@@ -47,13 +54,23 @@ pub struct BuiltPayment {
 }
 
 /// Try to parse an x402 challenge from headers and/or body.
-/// Defaults to preferring Solana mainnet when multiple chains are offered.
+///
+/// The full `accepts` array is preserved in `Challenge::all_accepts` so the
+/// builder can re-select the entry whose chain family matches the configured
+/// wallet. The `requirements` field is seeded with the Solana mainnet entry
+/// (when present) for backward compatibility; falling back to the first
+/// `accepts` entry otherwise.
 pub fn parse(headers: &[(String, String)], body: Option<&str>) -> Option<Challenge> {
-    let requirements = parse_x402_challenge_for_network(headers, body, Some(SOLANA_MAINNET))?;
+    let all_accepts = parse_payment_required_envelope(headers, body)
+        .map(|env| env.accepts)
+        .unwrap_or_default();
+    let requirements = parse_x402_challenge_for_network(headers, body, Some(SOLANA_MAINNET))
+        .or_else(|| all_accepts.first().cloned())?;
     let siwx = parse_siwx_extension(headers, body).ok().flatten();
     Some(Challenge {
         x402_version: detect_x402_version(headers, body),
         requirements,
+        all_accepts,
         siwx,
     })
 }
@@ -90,7 +107,46 @@ pub fn build_payment(
     account_override: Option<&str>,
     resource_url: Option<&str>,
 ) -> Result<BuiltPayment> {
-    let requirements = &challenge.requirements;
+    // Re-pick the right `accepts` entry for the wallet/override; falls back
+    // to the parser's default (`challenge.requirements`) when the envelope
+    // didn't carry alternatives or none match.
+    let requirements = if !challenge.all_accepts.is_empty() {
+        select_best_chain(&challenge.all_accepts, store, network_override)
+            .unwrap_or(&challenge.requirements)
+    } else {
+        &challenge.requirements
+    };
+
+    let selected_cluster = normalize_network(
+        requirements
+            .cluster
+            .as_deref()
+            .unwrap_or(requirements.network.as_str()),
+    );
+    let selected_network = network_override
+        .map(str::to_string)
+        .unwrap_or_else(|| selected_cluster.clone());
+
+    if crate::accounts::is_evm_network_family(&selected_network) {
+        #[cfg(feature = "evm")]
+        {
+            return crate::client::evm::build_evm_payment(
+                challenge,
+                requirements,
+                &selected_network,
+                store,
+                account_override,
+            );
+        }
+        #[cfg(not(feature = "evm"))]
+        {
+            return Err(Error::Config(format!(
+                "Network `{selected_network}` requires EVM support. \
+                 Rebuild with `cargo build --features evm`."
+            )));
+        }
+    }
+
     let amount = format_amount(&requirements.amount, &requirements.currency);
     let prompt_context = crate::client::prompt::payment_prompt_context(
         requirements.description.as_deref(),
@@ -102,21 +158,14 @@ pub fn build_payment(
         &prompt_context.operator,
     );
 
-    let cluster = normalize_network(
-        requirements
-            .cluster
-            .as_deref()
-            .unwrap_or(requirements.network.as_str()),
-    );
-
     // x402 may carry a recent blockhash, but the current pay-side guard only
     // compares the selected account network against the challenge network.
-    crate::client::mpp::check_client_network_intent(network_override, &cluster, None)?;
+    crate::client::mpp::check_client_network_intent(network_override, &selected_cluster, None)?;
 
     // Auto-fund when the user opted into sandbox or the challenge
     // advertises localnet (likely a sandbox gateway without --sandbox).
-    let user_opted_into_sandbox = network_override.is_some() || cluster == "localnet";
-    let network = network_override.map(str::to_string).unwrap_or(cluster);
+    let user_opted_into_sandbox = network_override.is_some() || selected_cluster == "localnet";
+    let network = selected_network;
 
     let (signer, ephemeral_notice) = crate::signer::load_signer_for_network_payment_with_intent(
         &network,
@@ -249,6 +298,55 @@ fn build_siwx_header(
     Ok(Some((SIGN_IN_WITH_X_HEADER, header)))
 }
 
+/// Select the best `PaymentRequirements` entry from a multi-chain `accepts`
+/// list.
+///
+/// Priority (first match wins):
+///   1. `network_override` (CLI `--network`) — pick the entry whose
+///      normalized network slug or `cluster` field matches.
+///   2. First entry whose normalized network already has a `default`
+///      account configured in `accounts.yml`.
+///   3. First non-EVM entry (Solana preference — preserves prior behaviour
+///      for servers that advertise both Solana and EVM).
+///   4. First entry overall.
+pub fn select_best_chain<'a>(
+    accepts: &'a [PaymentRequirements],
+    store: &dyn AccountsStore,
+    network_override: Option<&str>,
+) -> Option<&'a PaymentRequirements> {
+    if accepts.is_empty() {
+        return None;
+    }
+
+    if let Some(override_slug) = network_override
+        && let Some(r) = accepts.iter().find(|r| {
+            normalize_network(&r.network) == override_slug
+                || normalize_network(r.cluster.as_deref().unwrap_or("")) == override_slug
+        })
+    {
+        return Some(r);
+    }
+
+    if let Ok(file) = store.load()
+        && let Some(r) = accepts.iter().find(|r| {
+            let slug = normalize_network(&r.network);
+            file.named_account_for_network(&slug, crate::accounts::DEFAULT_ACCOUNT_NAME)
+                .is_some()
+        })
+    {
+        return Some(r);
+    }
+
+    if let Some(r) = accepts.iter().find(|r| {
+        let slug = normalize_network(&r.network);
+        !crate::accounts::is_evm_network_family(&slug)
+    }) {
+        return Some(r);
+    }
+
+    accepts.first()
+}
+
 /// Normalize CAIP-2 network identifiers to the slugs pay uses internally.
 ///
 /// x402 challenges use CAIP-2 chain IDs like `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`
@@ -259,6 +357,14 @@ fn normalize_network(raw: &str) -> String {
         SOLANA_MAINNET | "solana" | "mainnet-beta" => "mainnet".to_string(),
         SOLANA_DEVNET | "solana-devnet" => "devnet".to_string(),
         SOLANA_TESTNET | "solana-testnet" => "testnet".to_string(),
+        // EVM CAIP-2 chain IDs → pay slugs.
+        "eip155:1" => "ethereum".to_string(),
+        "eip155:8453" => "base".to_string(),
+        "eip155:10" => "optimism".to_string(),
+        "eip155:42161" => "arbitrum".to_string(),
+        "eip155:11155111" => "sepolia".to_string(),
+        "eip155:17000" => "holesky".to_string(),
+        "eip155:84532" => "base-sepolia".to_string(),
         // Already a slug
         s if !s.contains(':') => s.to_string(),
         // Unknown CAIP-2 — pass through, will error downstream with a clear message
@@ -828,6 +934,7 @@ mod tests {
         let challenge = Challenge {
             x402_version: X402_VERSION_V2,
             requirements: sample_requirements(),
+            all_accepts: vec![],
             siwx: Some(extension),
         };
 
@@ -940,6 +1047,7 @@ mod tests {
         let challenge = Challenge {
             x402_version: X402_VERSION_V2,
             requirements: sample_requirements(),
+            all_accepts: vec![],
             siwx: None,
         };
 
@@ -961,6 +1069,7 @@ mod tests {
         let challenge = Challenge {
             x402_version: X402_VERSION_V2,
             requirements: sample_requirements(),
+            all_accepts: vec![],
             siwx: None,
         };
 
@@ -979,6 +1088,7 @@ mod tests {
         let challenge = Challenge {
             x402_version: X402_VERSION_V2,
             requirements,
+            all_accepts: vec![],
             siwx: None,
         };
         let err = build_payment(&challenge, &store, None, Some("alice"), None).unwrap_err();

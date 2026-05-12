@@ -18,7 +18,12 @@ vendored-openssl = ["openssl-sys/vendored"]
 # Base-Sepolia) support. Pulls in alloy + x402-chain-eip155. Solana-only
 # users should leave this off; the entire Solana code path compiles
 # identically with `evm` off.
-evm = ["dep:alloy", "dep:x402-chain-eip155", "dep:hex"]
+evm = [
+    "dep:alloy",
+    "dep:x402-chain-eip155",
+    "dep:x402-types",
+    "dep:hex",
+]
 
 [dependencies]
 axum = { workspace = true, optional = true }
@@ -63,6 +68,7 @@ solana-transaction = { workspace = true }
 # EVM (opt-in; activated by the `evm` feature)
 alloy             = { workspace = true, optional = true }
 x402-chain-eip155 = { workspace = true, optional = true }
+x402-types        = { workspace = true, optional = true }
 hex               = { workspace = true, optional = true }
 
 [dev-dependencies]

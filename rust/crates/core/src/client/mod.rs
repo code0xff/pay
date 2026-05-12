@@ -1,4 +1,6 @@
 pub mod balance;
+#[cfg(feature = "evm")]
+pub mod evm;
 pub mod fetch;
 pub mod mpp;
 pub(crate) mod prompt;
