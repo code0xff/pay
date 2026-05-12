@@ -247,6 +247,8 @@ fn discover_legacy_account(name: &str) -> Option<Account> {
                 account: None,
                 path: None,
                 secret_key_b58: None,
+                chain_family: None,
+                secret_key_hex: None,
                 created_at: None,
             });
         }
@@ -266,6 +268,8 @@ fn discover_legacy_account(name: &str) -> Option<Account> {
                 account: None,
                 path: None,
                 secret_key_b58: None,
+                chain_family: None,
+                secret_key_hex: None,
                 created_at: None,
             });
         }
@@ -284,6 +288,8 @@ fn discover_legacy_account(name: &str) -> Option<Account> {
                 account: None,
                 path: None,
                 secret_key_b58: None,
+                chain_family: None,
+                secret_key_hex: None,
                 created_at: None,
             });
         }
