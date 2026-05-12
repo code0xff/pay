@@ -510,6 +510,8 @@ mod tests {
             account: None,
             path: None,
             secret_key_b58: None,
+            chain_family: None,
+            secret_key_hex: None,
             created_at: None,
         }
     }

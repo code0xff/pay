@@ -519,6 +519,73 @@ fn load_from_keystore_backend(
     Ok(bytes)
 }
 
+// ── EVM signer loader (x402 multi-chain path) ──────────────────────────────
+
+/// Resolve an EVM `ChainSigner` for the given network. Mirrors
+/// [`load_signer_for_network`] but returns the EVM-specific signer type.
+///
+/// Lookup order:
+/// 1. Named EVM account in `accounts.yml` (must have `chain_family: evm`).
+/// 2. Lazy-create an ephemeral on EVM testnets only.
+/// 3. Otherwise error with a setup hint.
+#[cfg(feature = "evm")]
+pub fn load_evm_signer_for_network(
+    network: &str,
+    store: &dyn crate::accounts::AccountsStore,
+    account_override: Option<&str>,
+) -> Result<(crate::chain::EvmChainSigner, Option<ResolvedEphemeral>)> {
+    use crate::accounts::{
+        DEFAULT_ACCOUNT_NAME, is_evm_lazy_network, load_or_create_ephemeral_for_network_as,
+    };
+    use crate::chain::{ChainFamily, EvmChainSigner};
+
+    let chain_id = match ChainFamily::from_network_slug(network) {
+        ChainFamily::Evm { chain_id } => chain_id,
+        _ => {
+            return Err(Error::Config(format!(
+                "Network `{network}` is not an EVM network"
+            )));
+        }
+    };
+
+    let file = store.load()?;
+    let account_name = account_override.unwrap_or(DEFAULT_ACCOUNT_NAME);
+
+    if let Some(account) = file
+        .named_account_for_network(network, account_name)
+        .cloned()
+    {
+        if !account.is_evm() {
+            return Err(Error::Config(format!(
+                "Account `{account_name}` on `{network}` is not EVM-family \
+                 (missing `chain_family: evm` in accounts.yml)"
+            )));
+        }
+        let key_hex = account.secret_key_hex.as_deref().ok_or_else(|| {
+            Error::Config(format!(
+                "EVM account `{account_name}` on `{network}` is missing \
+                 `secret_key_hex`. Keystore-backed EVM accounts are not yet supported."
+            ))
+        })?;
+        let signer = EvmChainSigner::from_hex(key_hex, chain_id)?;
+        return Ok((signer, None));
+    }
+
+    if is_evm_lazy_network(network) {
+        let resolved = load_or_create_ephemeral_for_network_as(network, account_name, store)?;
+        let key_hex = resolved.account.secret_key_hex.as_deref().ok_or_else(|| {
+            Error::Config("Generated EVM ephemeral is missing `secret_key_hex`".to_string())
+        })?;
+        let signer = EvmChainSigner::from_hex(key_hex, chain_id)?;
+        return Ok((signer, Some(resolved)));
+    }
+
+    Err(Error::Config(format!(
+        "No EVM account configured for network `{network}`. \
+         Add one to ~/.config/pay/accounts.yml with `chain_family: evm`."
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +714,8 @@ mod tests {
             account: None,
             path: None,
             secret_key_b58: Some(bs58::encode(&full).into_string()),
+            chain_family: None,
+            secret_key_hex: None,
             created_at: Some("2026-04-10T00:00:00Z".to_string()),
         }
     }
@@ -817,6 +886,8 @@ mod tests {
             path: None,
             account: None,
             secret_key_b58: None,
+            chain_family: None,
+            secret_key_hex: None,
             created_at: None,
         };
 

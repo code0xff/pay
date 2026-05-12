@@ -1503,6 +1503,8 @@ async fn mpp_build_credential_with_surfnet() {
                 account: None,
                 path: None,
                 secret_key_b58: Some(bs58::encode(&payer_bytes).into_string()),
+                chain_family: None,
+                secret_key_hex: None,
                 created_at: Some("2026-04-10T00:00:00Z".to_string()),
             },
         );

@@ -265,6 +265,8 @@ fn memory_store_for_keypair(keypair: &Keypair) -> MemoryAccountsStore {
             account: None,
             path: None,
             secret_key_b58: Some(bs58::encode(keypair.to_bytes()).into_string()),
+            chain_family: None,
+            secret_key_hex: None,
             created_at: Some("2026-04-19T00:00:00Z".to_string()),
         },
     );

@@ -859,6 +859,8 @@ mod tests {
             account: None,
             path: None,
             secret_key_b58: Some(bs58::encode(TEST_KEYPAIR_BYTES).into_string()),
+            chain_family: None,
+            secret_key_hex: None,
             created_at: Some("2026-04-27T00:00:00Z".to_string()),
         };
         let mut file = AccountsFile::default();

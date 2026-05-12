@@ -134,6 +134,17 @@ pub struct Account {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_key_b58: Option<String>,
 
+    /// Chain family this account targets — `"solana"` or `"evm"`. Defaults
+    /// to Solana when absent so existing Solana entries keep working.
+    /// Controls signer dispatch in the x402 multi-chain path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_family: Option<String>,
+
+    /// Hex-encoded 32-byte EVM private key (no `0x` prefix). EVM
+    /// counterpart of `secret_key_b58`; only set on EVM ephemeral entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_key_hex: Option<String>,
+
     /// RFC 3339 timestamp of when this account was first created. Only
     /// set for ephemeral entries (where it's load-bearing — older
     /// ephemerals may have less SOL because faucets reset).
@@ -178,6 +189,36 @@ impl Account {
             .into_vec()
             .ok()
     }
+
+    /// Whether this account is EVM-family. Absent `chain_family` defaults
+    /// to Solana for hindsight compatibility with the original schema.
+    pub fn is_evm(&self) -> bool {
+        self.chain_family.as_deref() == Some("evm")
+    }
+
+    /// Decoded 32-byte EVM private key for EVM ephemeral accounts. Returns
+    /// `None` for non-EVM accounts or when `secret_key_hex` is missing.
+    #[cfg(feature = "evm")]
+    pub fn evm_key_bytes(&self) -> Option<Vec<u8>> {
+        if !self.is_evm() {
+            return None;
+        }
+        let raw = self.secret_key_hex.as_deref()?;
+        hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).ok()
+    }
+}
+
+/// EVM mainnet + testnet slugs recognized by `pay`.
+pub fn is_evm_network_family(network: &str) -> bool {
+    matches!(
+        network,
+        "ethereum" | "base" | "optimism" | "arbitrum" | "sepolia" | "holesky" | "base-sepolia"
+    )
+}
+
+/// EVM testnets where missing entries can be lazily auto-generated.
+pub fn is_evm_lazy_network(network: &str) -> bool {
+    matches!(network, "sepolia" | "holesky" | "base-sepolia")
 }
 
 // ── AccountsFile ────────────────────────────────────────────────────────────
@@ -493,7 +534,7 @@ pub fn load_or_create_ephemeral_for_network_as(
         }
     }
 
-    let account = generate_ephemeral_account();
+    let account = generate_ephemeral_account_for_network(network)?;
     file.accounts
         .entry(network.to_string())
         .or_default()
@@ -540,7 +581,7 @@ pub fn load_or_create_exact_ephemeral_for_network_as(
         });
     }
 
-    let account = generate_ephemeral_account();
+    let account = generate_ephemeral_account_for_network(network)?;
     file.accounts
         .entry(network.to_string())
         .or_default()
@@ -554,7 +595,24 @@ pub fn load_or_create_exact_ephemeral_for_network_as(
     })
 }
 
-fn generate_ephemeral_account() -> Account {
+fn generate_ephemeral_account_for_network(network: &str) -> Result<Account> {
+    if is_evm_network_family(network) {
+        #[cfg(feature = "evm")]
+        {
+            return Ok(generate_evm_ephemeral_account(network));
+        }
+        #[cfg(not(feature = "evm"))]
+        {
+            return Err(Error::Config(format!(
+                "Network `{network}` requires EVM support, but this `pay` build does not include \
+                 it. Rebuild with `cargo build --features evm`."
+            )));
+        }
+    }
+    Ok(generate_solana_ephemeral_account())
+}
+
+fn generate_solana_ephemeral_account() -> Account {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let verifying_key = signing_key.verifying_key();
     let mut full = Vec::with_capacity(64);
@@ -569,6 +627,32 @@ fn generate_ephemeral_account() -> Account {
         account: None,
         path: None,
         secret_key_b58: Some(bs58::encode(&full).into_string()),
+        chain_family: None,
+        secret_key_hex: None,
+        created_at: Some(now_rfc3339()),
+    }
+}
+
+#[cfg(feature = "evm")]
+fn generate_evm_ephemeral_account(network: &str) -> Account {
+    use crate::chain::{ChainFamily, ChainSigner, EvmChainSigner};
+
+    let chain_id = match ChainFamily::from_network_slug(network) {
+        ChainFamily::Evm { chain_id } => chain_id,
+        _ => 1,
+    };
+    let signer = EvmChainSigner::random(chain_id);
+    Account {
+        keystore: Keystore::Ephemeral,
+        active: false,
+        auth_required: Some(false),
+        pubkey: Some(signer.address()),
+        vault: None,
+        account: None,
+        path: None,
+        secret_key_b58: None,
+        chain_family: Some("evm".to_string()),
+        secret_key_hex: Some(signer.to_hex_key()),
         created_at: Some(now_rfc3339()),
     }
 }
@@ -641,6 +725,8 @@ mod tests {
             path: None,
             account: None,
             secret_key_b58: None,
+            chain_family: None,
+            secret_key_hex: None,
             created_at: None,
         }
     }
@@ -655,6 +741,8 @@ mod tests {
             account: None,
             path: None,
             secret_key_b58: Some("test-secret-bytes-base58".to_string()),
+            chain_family: None,
+            secret_key_hex: None,
             created_at: Some("2026-04-10T00:00:00Z".to_string()),
         }
     }
@@ -709,6 +797,8 @@ mod tests {
             path: Some("/home/me/.config/solana/id.json".to_string()),
             account: None,
             secret_key_b58: None,
+            chain_family: None,
+            secret_key_hex: None,
             created_at: None,
         };
         assert_eq!(
@@ -728,6 +818,8 @@ mod tests {
             path: None,
             account: None,
             secret_key_b58: None,
+            chain_family: None,
+            secret_key_hex: None,
             created_at: None,
         };
         assert_eq!(
@@ -748,6 +840,8 @@ mod tests {
             account: None,
             path: None,
             secret_key_b58: Some(bs58::encode(&raw_bytes).into_string()),
+            chain_family: None,
+            secret_key_hex: None,
             created_at: Some("2026-04-10T00:00:00Z".to_string()),
         };
         assert_eq!(acct.ephemeral_keypair_bytes(), Some(raw_bytes));
@@ -1150,5 +1244,96 @@ mod tests {
         assert!(yaml.contains("ephemeral"));
         assert!(yaml.contains("secret_key_b58"));
         assert!(yaml.contains("created_at"));
+    }
+
+    // ── EVM field handling ───────────────────────────────────────────────
+
+    #[test]
+    fn solana_account_is_evm_false() {
+        assert!(!keychain_account("pk").is_evm());
+        assert!(!fake_ephemeral("pk").is_evm());
+    }
+
+    #[test]
+    fn evm_account_is_evm_true() {
+        let mut acct = keychain_account("0xabc");
+        acct.chain_family = Some("evm".to_string());
+        assert!(acct.is_evm());
+    }
+
+    #[test]
+    fn yaml_skips_evm_fields_when_absent() {
+        let acct = keychain_account("pk");
+        let yaml = serde_yml::to_string(&acct).unwrap();
+        assert!(!yaml.contains("chain_family"));
+        assert!(!yaml.contains("secret_key_hex"));
+    }
+
+    #[test]
+    fn legacy_solana_yaml_round_trips_without_evm_fields() {
+        // A pre-Phase-2 YAML payload must still deserialize cleanly.
+        let yaml = r#"
+keystore: apple-keychain
+auth_required: true
+pubkey: SomePubkey
+"#;
+        let acct: Account = serde_yml::from_str(yaml).unwrap();
+        assert!(!acct.is_evm());
+        assert_eq!(acct.chain_family, None);
+        assert_eq!(acct.secret_key_hex, None);
+    }
+
+    #[test]
+    fn is_evm_network_family_recognizes_known_slugs() {
+        assert!(is_evm_network_family("ethereum"));
+        assert!(is_evm_network_family("base"));
+        assert!(is_evm_network_family("sepolia"));
+        assert!(is_evm_network_family("base-sepolia"));
+        assert!(!is_evm_network_family("mainnet"));
+        assert!(!is_evm_network_family("devnet"));
+    }
+
+    #[test]
+    fn is_evm_lazy_network_only_testnets() {
+        assert!(is_evm_lazy_network("sepolia"));
+        assert!(is_evm_lazy_network("holesky"));
+        assert!(is_evm_lazy_network("base-sepolia"));
+        assert!(!is_evm_lazy_network("ethereum"));
+        assert!(!is_evm_lazy_network("base"));
+    }
+
+    #[cfg(feature = "evm")]
+    #[test]
+    fn evm_ephemeral_generated_for_sepolia() {
+        let store = MemoryAccountsStore::new();
+        let resolved = load_or_create_ephemeral_for_network("sepolia", &store).unwrap();
+        assert!(resolved.created);
+        assert!(resolved.account.is_evm());
+        assert_eq!(resolved.account.secret_key_b58, None);
+        let hex = resolved.account.secret_key_hex.as_deref().unwrap();
+        assert_eq!(hex.len(), 64, "32-byte key as 64 hex chars: {hex}");
+        let pk = resolved.account.pubkey.as_deref().unwrap();
+        assert!(pk.starts_with("0x") && pk.len() == 42);
+    }
+
+    #[cfg(feature = "evm")]
+    #[test]
+    fn evm_key_bytes_roundtrip() {
+        let store = MemoryAccountsStore::new();
+        let resolved = load_or_create_ephemeral_for_network("sepolia", &store).unwrap();
+        let bytes = resolved.account.evm_key_bytes().expect("decoded key bytes");
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[cfg(not(feature = "evm"))]
+    #[test]
+    fn evm_network_without_feature_returns_clear_error() {
+        let store = MemoryAccountsStore::new();
+        let err = load_or_create_ephemeral_for_network("sepolia", &store).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires EVM support") && msg.contains("--features evm"),
+            "expected EVM-feature guidance, got: {msg}"
+        );
     }
 }
