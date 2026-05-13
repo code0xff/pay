@@ -491,18 +491,6 @@ pub(crate) fn classify_402(
         };
     }
 
-    // Neither protocol supports Solana — tell the user clearly.
-    if !mpp_challenges.is_empty() {
-        return RunOutcome::PaymentRejected {
-            reason: "Server requires payment but only accepts non-Solana chains \
-                     (e.g. Base/EVM). This endpoint is not compatible with `pay`. \
-                     Check if the provider supports Solana USDC."
-                .to_string(),
-            retryable: false,
-            resource_url: resource_url.to_string(),
-        };
-    }
-
     RunOutcome::UnknownPaymentRequired {
         headers: headers.to_vec(),
         resource_url: resource_url.to_string(),
@@ -1084,11 +1072,14 @@ HTTP request sent, awaiting response...
     }
 
     #[test]
-    fn classify_402_rejects_evm_only_mpp_with_clear_error() {
+    fn classify_402_falls_through_for_evm_only_mpp() {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        // MPP challenge with EVM-style Tempo recipient (not Solana)
+        // MPP challenge with EVM-style Tempo recipient (not Solana). MPP itself
+        // is Solana-only in pay; EVM payments flow through x402. When no x402
+        // entry exists, the classifier yields `UnknownPaymentRequired` rather
+        // than a hard rejection, letting callers surface the raw headers.
         let request_json = serde_json::json!({
             "amount": "10000",
             "currency": "0x20c00000000000000000000b9537d11c60e8b50",
@@ -1103,17 +1094,8 @@ HTTP request sent, awaiting response...
             ),
         )];
 
-        // EVM-only MPP with no x402 fallback → clear rejection
         let outcome = classify_402(&headers, None, "https://evm-only.example.com/api");
-        match outcome {
-            RunOutcome::PaymentRejected { reason, .. } => {
-                assert!(
-                    reason.contains("non-Solana"),
-                    "Expected non-Solana message, got: {reason}"
-                );
-            }
-            other => panic!("Expected PaymentRejected, got: {other:?}"),
-        }
+        assert!(matches!(outcome, RunOutcome::UnknownPaymentRequired { .. }));
     }
 
     #[test]
