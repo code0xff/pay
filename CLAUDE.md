@@ -183,22 +183,36 @@ alloy = { version = "1.7.3", features = [
 - [x] 세션 결제
 - [x] Payment Debugger
 
-### 구현 대상 (EVM 멀티체인)
-- [ ] Phase 1: `chain.rs` — ChainFamily/ChainSigner 추상화
-- [ ] Phase 2: `accounts.rs` — EVM 계정 레지스트리 확장
-- [ ] Phase 3: `x402.rs` + `evm.rs` — x402 멀티체인 지원
-- [ ] Phase 4: `runner.rs` — EVM 거부 코드 제거
-- [ ] Phase 5: `balance.rs` — EVM 잔액 조회
+### 완료 (EVM 멀티체인)
+- [x] Phase 1: `chain.rs` — ChainFamily/ChainSigner 추상화 (커밋 `8685a58`)
+- [x] Phase 2: `accounts.rs` — EVM 계정 레지스트리 확장 (커밋 `1926aff`, 백필 `7aa1318`, `65df6c6`)
+- [x] Phase 3: `x402.rs` + `evm.rs` — x402 멀티체인 지원 (커밋 `aa4ca0f`)
+- [x] Phase 4: `runner.rs` — EVM 거부 코드 제거 (커밋 `b68e1cf`)
+- [x] Phase 5: `balance.rs` — EVM 잔액 조회 (커밋 `37a3acc`)
+
+### 후속 작업 (별도 트랙)
+
+CLAUDE.md의 원래 EVM 멀티체인 플랜은 Phase 1–5로 완료되었다. 이후 발견된 작업은
+모두 별도 트랙으로 관리한다.
+
+- [ ] Phase 6: x402 서버 프록시 — 별도 트랙 (EVM 클라이언트 작업과 독립)
+- [ ] Phase 7: EVM UX 보정 — explorer 링크, send/topup 가드, 잔액 표시 통합
+- [ ] Phase 8: EVM 라이브 통합 테스트 — Sepolia/Base-Sepolia 실 RPC 검증
+- [ ] Phase 9: EVM 키스토어 백엔드 — Apple Keychain/Linux/Windows 보관 (secp256k1)
 
 ### 단계별 구현 가이드
 
-| Phase | 문서 | 핵심 변경 |
-|-------|------|---------|
-| 1 | [docs/implementation/01-phase1-chain-abstraction.md](docs/implementation/01-phase1-chain-abstraction.md) | `chain.rs` 신규, alloy/x402-chain-eip155 의존성 추가 |
-| 2 | [docs/implementation/02-phase2-account-registry.md](docs/implementation/02-phase2-account-registry.md) | `accounts.rs` EVM 필드, ephemeral 키 생성 분기 |
-| 3 | [docs/implementation/03-phase3-x402-multichain.md](docs/implementation/03-phase3-x402-multichain.md) | `x402.rs` 멀티체인 파싱, `evm.rs` 신규 |
-| 4 | [docs/implementation/04-phase4-runner-cleanup.md](docs/implementation/04-phase4-runner-cleanup.md) | `runner.rs` EVM 거부 블록 삭제 |
-| 5 | [docs/implementation/05-phase5-evm-balance.md](docs/implementation/05-phase5-evm-balance.md) | `balance.rs` EVM 잔액 조회 추가 |
+| Phase | 문서 | 핵심 변경 | 상태 |
+|-------|------|---------|------|
+| 1 | [docs/implementation/01-phase1-chain-abstraction.md](docs/implementation/01-phase1-chain-abstraction.md) | `chain.rs` 신규, alloy/x402-chain-eip155 의존성 추가 | 완료 |
+| 2 | [docs/implementation/02-phase2-account-registry.md](docs/implementation/02-phase2-account-registry.md) | `accounts.rs` EVM 필드, ephemeral 키 생성 분기 | 완료 |
+| 3 | [docs/implementation/03-phase3-x402-multichain.md](docs/implementation/03-phase3-x402-multichain.md) | `x402.rs` 멀티체인 파싱, `evm.rs` 신규 | 완료 |
+| 4 | [docs/implementation/04-phase4-runner-cleanup.md](docs/implementation/04-phase4-runner-cleanup.md) | `runner.rs` EVM 거부 블록 삭제 | 완료 |
+| 5 | [docs/implementation/05-phase5-evm-balance.md](docs/implementation/05-phase5-evm-balance.md) | `balance.rs` EVM 잔액 조회 추가 | 완료 |
+| 6 | [docs/implementation/06-phase6-x402-server.md](docs/implementation/06-phase6-x402-server.md) | `pay server`에 x402 서버 프록시 추가 | 설계 완료 |
+| 7 | [docs/implementation/07-phase7-evm-ux.md](docs/implementation/07-phase7-evm-ux.md) | EVM 익스플로러 링크 + send/topup 가드 | 설계 완료 |
+| 8 | [docs/implementation/08-phase8-evm-integration-tests.md](docs/implementation/08-phase8-evm-integration-tests.md) | Sepolia 실 RPC 통합 테스트 | 설계 완료 |
+| 9 | [docs/implementation/09-phase9-evm-keystore.md](docs/implementation/09-phase9-evm-keystore.md) | secp256k1 키스토어 백엔드 | 설계 완료 |
 
 ---
 

@@ -14,15 +14,24 @@ x402 프로토콜에서 Solana와 Ethereum(EVM)을 동시 지원한다.
 
 ---
 
-## 구현 단계
+## 구현 단계 (원래 플랜)
 
-| Phase | 파일 | 내용 | 의존 |
-|-------|------|------|------|
-| **1** | `chain.rs` (신규) | ChainFamily/ChainSigner 추상화 | alloy |
-| **2** | `accounts.rs` | EVM 계정 레지스트리 확장 | alloy-signer-local |
-| **3** | `x402.rs` + `evm.rs` (신규) | x402 멀티체인 파싱·서명 | x402-chain-eip155, alloy |
-| **4** | `runner.rs` | EVM 거부 코드 제거, store 전달 | — |
-| **5** | `balance.rs` | EVM 잔액 조회 | alloy-provider |
+| Phase | 파일 | 내용 | 의존 | 상태 |
+|-------|------|------|------|------|
+| **1** | `chain.rs` (신규) | ChainFamily/ChainSigner 추상화 | alloy | 완료 (`8685a58`) |
+| **2** | `accounts.rs` | EVM 계정 레지스트리 확장 | alloy-signer-local | 완료 (`1926aff`+백필) |
+| **3** | `x402.rs` + `evm.rs` (신규) | x402 멀티체인 파싱·서명 | x402-chain-eip155, alloy | 완료 (`aa4ca0f`) |
+| **4** | `runner.rs` | EVM 거부 코드 제거, store 전달 | — | 완료 (`b68e1cf`) |
+| **5** | `balance.rs` | EVM 잔액 조회 | alloy-provider | 완료 (`37a3acc`) |
+
+## 후속 작업 (별도 트랙)
+
+| Phase | 내용 | 상태 |
+|-------|------|------|
+| **6** | x402 서버 프록시 (`pay server`에 x402 게이트웨이 추가) | 설계 완료 |
+| **7** | EVM UX 보정 (익스플로러 링크, send/topup 가드) | 설계 완료 |
+| **8** | EVM 라이브 통합 테스트 (Sepolia/Base-Sepolia 실 RPC) | 설계 완료 |
+| **9** | EVM 키스토어 백엔드 (secp256k1 OS 키스토어) | 설계 완료 |
 
 ---
 
@@ -95,8 +104,15 @@ hex               = { workspace = true, optional = true }
 
 ## 파일별 구현 문서
 
+### 원래 플랜 (완료)
 - [Phase 1: Chain 추상화](./01-phase1-chain-abstraction.md)
 - [Phase 2: EVM 계정 레지스트리](./02-phase2-account-registry.md)
 - [Phase 3: x402 멀티체인](./03-phase3-x402-multichain.md)
 - [Phase 4: Runner 정리](./04-phase4-runner-cleanup.md)
 - [Phase 5: EVM 잔액 조회](./05-phase5-evm-balance.md)
+
+### 후속 작업 (설계만 완료)
+- [Phase 6: x402 서버 프록시](./06-phase6-x402-server.md) — EVM 클라이언트와 무관, 별도 트랙
+- [Phase 7: EVM UX 보정](./07-phase7-evm-ux.md) — explorer 링크, send/topup 가드
+- [Phase 8: EVM 라이브 통합 테스트](./08-phase8-evm-integration-tests.md) — Sepolia 실 RPC
+- [Phase 9: EVM 키스토어 백엔드](./09-phase9-evm-keystore.md) — secp256k1 OS 키스토어
