@@ -71,9 +71,10 @@ impl WhoamiCommand {
         eprintln!();
         eprintln!("{}", format_account_header(name, network, pubkey));
 
-        // 3. Stablecoin balances via pay-api. RPC URL must match the
-        //    target network: `PAY_RPC_URL` (set by main.rs for sandbox/
-        //    local) for non-mainnet, otherwise the configured mainnet RPC.
+        // 3. Stablecoin balances. EVM networks go through the dedicated
+        //    `get_evm_balances` (direct JSON-RPC), Solana networks go through
+        //    pay-api. RPC URL is only used for the Solana path and for the
+        //    fallback "api offline" explorer link.
         let rpc_url = if network == MAINNET_NETWORK {
             let config = pay_core::Config::load().unwrap_or_default();
             config
@@ -96,7 +97,24 @@ impl WhoamiCommand {
             }
         };
 
-        match rt.block_on(pay_core::balance::get_stablecoin_balances(&rpc_url, pubkey)) {
+        let is_evm = pay_core::accounts::is_evm_network_family(network) || account.is_evm();
+        let balance_result: pay_core::Result<pay_core::client::balance::AccountBalances> = if is_evm
+        {
+            #[cfg(feature = "evm")]
+            {
+                rt.block_on(pay_core::balance::get_evm_balances(network, pubkey))
+            }
+            #[cfg(not(feature = "evm"))]
+            {
+                Err(pay_core::Error::Config(
+                    "EVM balance lookup requires `--features evm`.".to_string(),
+                ))
+            }
+        } else {
+            rt.block_on(pay_core::balance::get_stablecoin_balances(&rpc_url, pubkey))
+        };
+
+        match balance_result {
             Ok(b) if b.tokens_unavailable => print_balance_unavailable("", Some(pubkey), &rpc_url),
             Ok(b) => {
                 let any_nonzero = print_balances(&b, "");

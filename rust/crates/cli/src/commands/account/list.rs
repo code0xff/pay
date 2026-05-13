@@ -58,50 +58,92 @@ pub fn print_account_list(
     let mut balance_cache: HashMap<String, Option<pay_core::client::balance::AccountBalances>> =
         HashMap::new();
 
+    enum BalanceJobResult {
+        Solana(std::collections::HashMap<String, pay_core::client::balance::AccountBalances>),
+        #[cfg(feature = "evm")]
+        Evm {
+            address: String,
+            result: pay_core::Result<pay_core::client::balance::AccountBalances>,
+        },
+    }
+
     if let Some(rt) = &rt {
-        // Group unique pubkeys by their network's RPC URL so pay-api receives
-        // the correct network for each account.
+        // Solana accounts: group by RPC so pay-api receives the right network
+        // per account. EVM accounts are looked up individually (different RPC
+        // endpoint family, different fetcher).
         let mut by_rpc: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
+        let mut evm_lookups: Vec<(String, String)> = Vec::new();
         for (network, named_accounts) in &accounts.accounts {
-            let network_rpc = match network.as_str() {
-                "mainnet" => rpc_url.clone(),
-                "localnet" => pay_core::config::SANDBOX_RPC_URL.to_string(),
-                "devnet" => "https://api.devnet.solana.com".to_string(),
-                _ => rpc_url.clone(),
-            };
             for account in named_accounts.values() {
-                if let Some(pubkey) = &account.pubkey {
-                    by_rpc
-                        .entry(network_rpc.clone())
-                        .or_default()
-                        .push(pubkey.clone());
+                let Some(pubkey) = &account.pubkey else {
+                    continue;
+                };
+                if pay_core::accounts::is_evm_network_family(network) || account.is_evm() {
+                    evm_lookups.push((network.clone(), pubkey.clone()));
+                    continue;
                 }
+                let network_rpc = match network.as_str() {
+                    "mainnet" => rpc_url.clone(),
+                    "localnet" => pay_core::config::SANDBOX_RPC_URL.to_string(),
+                    "devnet" => "https://api.devnet.solana.com".to_string(),
+                    _ => rpc_url.clone(),
+                };
+                by_rpc
+                    .entry(network_rpc)
+                    .or_default()
+                    .push(pubkey.clone());
             }
         }
-        // Deduplicate within each group
         for pubkeys in by_rpc.values_mut() {
             pubkeys.sort_unstable();
             pubkeys.dedup();
         }
+        evm_lookups.sort();
+        evm_lookups.dedup();
 
-        // One stablecoin balance batch per RPC endpoint, all concurrent.
         let results_vec = rt.block_on(async {
             let mut set = tokio::task::JoinSet::new();
             for (rpc, pubkeys) in by_rpc {
                 set.spawn(async move {
-                    pay_core::balance::get_stablecoin_balances_batch(&rpc, &pubkeys).await
+                    let map =
+                        pay_core::balance::get_stablecoin_balances_batch(&rpc, &pubkeys).await;
+                    BalanceJobResult::Solana(map)
                 });
             }
+            #[cfg(feature = "evm")]
+            for (network, address) in evm_lookups.clone() {
+                set.spawn(async move {
+                    let result =
+                        pay_core::balance::get_evm_balances(&network, &address).await;
+                    BalanceJobResult::Evm { address, result }
+                });
+            }
+            // Silence unused warning when `evm` is disabled.
+            #[cfg(not(feature = "evm"))]
+            let _ = &evm_lookups;
             let mut out = Vec::new();
             while let Some(Ok(results)) = set.join_next().await {
                 out.push(results);
             }
             out
         });
-        for results in results_vec {
-            for (pk, bal) in results {
-                balance_cache.insert(pk, Some(bal));
+        for job in results_vec {
+            match job {
+                BalanceJobResult::Solana(map) => {
+                    for (pk, bal) in map {
+                        balance_cache.insert(pk, Some(bal));
+                    }
+                }
+                #[cfg(feature = "evm")]
+                BalanceJobResult::Evm { address, result } => match result {
+                    Ok(bal) => {
+                        balance_cache.insert(address, Some(bal));
+                    }
+                    Err(_) => {
+                        balance_cache.insert(address, None);
+                    }
+                },
             }
         }
     }

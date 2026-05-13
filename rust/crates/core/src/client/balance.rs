@@ -400,6 +400,216 @@ async fn rpc_call(
     Ok(result)
 }
 
+// ── EVM balance lookups ─────────────────────────────────────────────────────
+//
+// Gated behind the `evm` Cargo feature. The Solana path above is untouched —
+// EVM callers must dispatch to `get_evm_balances` explicitly with a network
+// slug, since the RPC URL alone is not enough to distinguish chain families.
+
+#[cfg(feature = "evm")]
+pub use evm_balances::{evm_default_rpc_url, evm_rpc_url, get_evm_balances};
+
+#[cfg(feature = "evm")]
+mod evm_balances {
+    use super::{AccountBalances, TokenBalance};
+    use alloy::primitives::{Address, U256, utils::format_units};
+    use alloy::providers::{Provider, ProviderBuilder};
+    use alloy::sol;
+    use std::str::FromStr;
+
+    sol! {
+        #[sol(rpc)]
+        interface IERC20 {
+            function balanceOf(address account) external view returns (uint256);
+        }
+    }
+
+    /// Default EVM JSON-RPC URLs by pay network slug.
+    /// Override per-network with `PAY_<NETWORK>_RPC_URL`
+    /// (e.g. `PAY_SEPOLIA_RPC_URL`, `PAY_BASE_SEPOLIA_RPC_URL`).
+    pub fn evm_default_rpc_url(network: &str) -> &'static str {
+        match network {
+            "ethereum" => "https://ethereum.publicnode.com",
+            "base" => "https://base.publicnode.com",
+            "optimism" => "https://optimism.publicnode.com",
+            "arbitrum" => "https://arbitrum-one.publicnode.com",
+            "sepolia" => "https://ethereum-sepolia.publicnode.com",
+            "holesky" => "https://ethereum-holesky.publicnode.com",
+            "base-sepolia" => "https://base-sepolia.publicnode.com",
+            _ => "https://ethereum.publicnode.com",
+        }
+    }
+
+    pub fn evm_rpc_url(network: &str) -> String {
+        let env_key = format!("PAY_{}_RPC_URL", network.to_uppercase().replace('-', "_"));
+        std::env::var(&env_key).unwrap_or_else(|_| evm_default_rpc_url(network).to_string())
+    }
+
+    /// Well-known ERC-20 stablecoin contract addresses per network.
+    /// Returns `None` when we don't track the (network, symbol) pair — caller
+    /// silently skips it rather than guessing at an address.
+    pub(super) fn evm_stablecoin_address(network: &str, symbol: &str) -> Option<&'static str> {
+        match (network, symbol) {
+            ("ethereum", "USDC") => Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+            ("ethereum", "USDT") => Some("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+            ("base", "USDC") => Some("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+            ("optimism", "USDC") => Some("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"),
+            ("arbitrum", "USDC") => Some("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
+            ("sepolia", "USDC") => Some("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
+            ("base-sepolia", "USDC") => Some("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
+            _ => None,
+        }
+    }
+
+    /// Fetch ETH + well-known ERC-20 stablecoin balances for an EVM address.
+    ///
+    /// The Solana-shaped `AccountBalances` struct is reused so existing
+    /// renderers work without changes:
+    /// - `sol_lamports` stays 0 (no Solana native balance on EVM).
+    /// - Native ETH is emitted as a `TokenBalance { symbol: Some("ETH") }`.
+    /// - Stablecoin balances are emitted as `TokenBalance` with `symbol`
+    ///   set to the human-readable ticker, `mint` to the contract address.
+    pub async fn get_evm_balances(
+        network: &str,
+        address: &str,
+    ) -> crate::Result<AccountBalances> {
+        let rpc_url = evm_rpc_url(network);
+        let parsed_url: reqwest::Url = rpc_url
+            .parse()
+            .map_err(|e| crate::Error::Config(format!("Invalid EVM RPC URL `{rpc_url}`: {e}")))?;
+        let provider = ProviderBuilder::new().connect_http(parsed_url);
+
+        let addr = Address::from_str(address).map_err(|e| {
+            crate::Error::Config(format!("Invalid EVM address `{address}`: {e}"))
+        })?;
+
+        let mut tokens = Vec::new();
+
+        match provider.get_balance(addr).await {
+            Ok(wei) => {
+                if wei > U256::ZERO {
+                    let ui = format_units(wei, "ether")
+                        .ok()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    tokens.push(TokenBalance {
+                        mint: "ETH".to_string(),
+                        raw_amount: u256_saturate_u64(wei),
+                        ui_amount: ui,
+                        symbol: Some("ETH"),
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, network, "eth_getBalance failed");
+                return Err(crate::Error::Config(format!(
+                    "eth_getBalance for {address} on {network} failed: {e}"
+                )));
+            }
+        }
+
+        for symbol in ["USDC", "USDT"] {
+            let Some(contract_addr) = evm_stablecoin_address(network, symbol) else {
+                continue;
+            };
+            let contract = Address::from_str(contract_addr).expect("static stablecoin address");
+            let erc20 = IERC20::new(contract, &provider);
+            match erc20.balanceOf(addr).call().await {
+                Ok(raw) if raw > U256::ZERO => {
+                    // USDC/USDT both use 6 decimals on every chain we list.
+                    let ui = format_units(raw, 6u8)
+                        .ok()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    tokens.push(TokenBalance {
+                        mint: contract_addr.to_string(),
+                        raw_amount: u256_saturate_u64(raw),
+                        ui_amount: ui,
+                        symbol: Some(symbol),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        symbol,
+                        contract = contract_addr,
+                        error = %e,
+                        "ERC-20 balanceOf failed — skipping"
+                    );
+                }
+            }
+        }
+
+        Ok(AccountBalances {
+            sol_lamports: 0,
+            tokens,
+            tokens_unavailable: false,
+        })
+    }
+
+    fn u256_saturate_u64(v: U256) -> u64 {
+        if v <= U256::from(u64::MAX) {
+            v.to::<u64>()
+        } else {
+            u64::MAX
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn evm_default_rpc_url_returns_known_endpoints() {
+            assert!(evm_default_rpc_url("ethereum").contains("ethereum"));
+            assert!(evm_default_rpc_url("base").contains("base"));
+            assert!(evm_default_rpc_url("sepolia").contains("sepolia"));
+            assert!(evm_default_rpc_url("base-sepolia").contains("base-sepolia"));
+            // Unknown slug falls back to Ethereum mainnet rather than panicking.
+            assert!(evm_default_rpc_url("polygon").contains("ethereum"));
+        }
+
+        #[test]
+        fn evm_rpc_url_respects_env_override() {
+            // SAFETY: single-threaded test context.
+            unsafe { std::env::set_var("PAY_SEPOLIA_RPC_URL", "https://example.test/sepolia") };
+            assert_eq!(evm_rpc_url("sepolia"), "https://example.test/sepolia");
+            unsafe { std::env::remove_var("PAY_SEPOLIA_RPC_URL") };
+            assert_eq!(evm_rpc_url("sepolia"), evm_default_rpc_url("sepolia"));
+        }
+
+        #[test]
+        fn evm_rpc_url_normalises_hyphenated_slugs() {
+            unsafe {
+                std::env::set_var("PAY_BASE_SEPOLIA_RPC_URL", "https://example.test/base-sepolia")
+            };
+            assert_eq!(evm_rpc_url("base-sepolia"), "https://example.test/base-sepolia");
+            unsafe { std::env::remove_var("PAY_BASE_SEPOLIA_RPC_URL") };
+        }
+
+        #[test]
+        fn evm_stablecoin_address_known_pairs() {
+            assert!(evm_stablecoin_address("ethereum", "USDC").is_some());
+            assert!(evm_stablecoin_address("ethereum", "USDT").is_some());
+            assert!(evm_stablecoin_address("base", "USDC").is_some());
+            assert!(evm_stablecoin_address("sepolia", "USDC").is_some());
+            assert!(evm_stablecoin_address("base-sepolia", "USDC").is_some());
+            // Unknown pair returns None rather than guessing.
+            assert!(evm_stablecoin_address("polygon", "USDC").is_none());
+            assert!(evm_stablecoin_address("base", "USDT").is_none());
+        }
+
+        #[test]
+        fn u256_saturate_u64_clamps_oversized_values() {
+            assert_eq!(u256_saturate_u64(U256::ZERO), 0);
+            assert_eq!(u256_saturate_u64(U256::from(123u64)), 123);
+            assert_eq!(u256_saturate_u64(U256::from(u64::MAX)), u64::MAX);
+            let huge = U256::from(u64::MAX).checked_add(U256::from(1u64)).unwrap();
+            assert_eq!(u256_saturate_u64(huge), u64::MAX);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
