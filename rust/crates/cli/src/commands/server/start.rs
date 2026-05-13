@@ -1980,6 +1980,8 @@ endpoints:
             account: None,
             path: None,
             secret_key_b58: Some(bs58::encode(&VALID_TEST_KEYPAIR_BYTES[..]).into_string()),
+            chain_family: None,
+            secret_key_hex: None,
             created_at: Some("2026-04-10T00:00:00Z".to_string()),
         };
         (acct, pubkey)
@@ -2099,6 +2101,8 @@ endpoints:
             path: None,
             // Valid base58 but wrong length (decodes to <64 bytes).
             secret_key_b58: Some("abc".to_string()),
+            chain_family: None,
+            secret_key_hex: None,
             created_at: Some("2026-04-10T00:00:00Z".to_string()),
         };
         file.upsert(pay_core::accounts::MAINNET_NETWORK, "broken", bad);
