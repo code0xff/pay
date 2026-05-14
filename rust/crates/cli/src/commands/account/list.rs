@@ -218,12 +218,22 @@ pub fn print_account_list(
                 .and_then(|b| b.as_ref());
             let funded = match bal {
                 Some(b) if b.tokens_unavailable => {
-                    print_balance_unavailable(BALANCE_INDENT, account.pubkey.as_deref(), &rpc_url);
+                    print_balance_unavailable(
+                        BALANCE_INDENT,
+                        account.pubkey.as_deref(),
+                        network,
+                        &rpc_url,
+                    );
                     false
                 }
                 Some(b) => print_balances(b, BALANCE_INDENT),
                 None => {
-                    print_balance_unavailable(BALANCE_INDENT, account.pubkey.as_deref(), &rpc_url);
+                    print_balance_unavailable(
+                        BALANCE_INDENT,
+                        account.pubkey.as_deref(),
+                        network,
+                        &rpc_url,
+                    );
                     false
                 }
             };
@@ -251,6 +261,7 @@ pub fn print_account_list(
 pub fn format_balance_display(
     bal: Option<&pay_core::client::balance::AccountBalances>,
     pubkey: Option<&str>,
+    network: &str,
     rpc_url: &str,
 ) -> String {
     match bal {
@@ -273,12 +284,12 @@ pub fn format_balance_display(
                 parts.push(format!("{:.2} {label}", token.ui_amount));
             }
             if parts.is_empty() {
-                explorer_link(pubkey, rpc_url)
+                explorer_link(pubkey, network, rpc_url)
             } else {
                 parts.join("  ")
             }
         }
-        None => explorer_link(pubkey, rpc_url),
+        None => explorer_link(pubkey, network, rpc_url),
     }
 }
 

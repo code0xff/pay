@@ -163,7 +163,12 @@ fn display_balance(pubkey: &str) {
         .clone()
         .unwrap_or_else(pay_core::balance::mainnet_rpc_url);
     let bal = super::list::fetch_balance(pubkey);
-    let display = super::list::format_balance_display(bal.as_ref(), Some(pubkey), &rpc_url);
+    let display = super::list::format_balance_display(
+        bal.as_ref(),
+        Some(pubkey),
+        pay_core::accounts::MAINNET_NETWORK,
+        &rpc_url,
+    );
     eprintln!("  {}  {}", "Balance:".dimmed(), display);
 }
 

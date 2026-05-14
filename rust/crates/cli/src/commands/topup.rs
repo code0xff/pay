@@ -13,7 +13,14 @@ pub struct TopupCommand {
 }
 
 impl TopupCommand {
-    pub fn run(self) -> pay_core::Result<()> {
+    pub fn run(self, network_override: Option<&str>) -> pay_core::Result<()> {
+        // `pay topup` is Solana-only. Reject EVM slugs at the entry so a
+        // `--network sepolia` invocation doesn't drop into the Solana
+        // funding flow with confusing downstream errors.
+        if let Some(slug) = network_override {
+            crate::commands::send::reject_evm_network("topup", slug)?;
+        }
+
         let config = pay_core::Config::load().unwrap_or_default();
 
         let (network, rpc_url) = if self.sandbox {
@@ -139,5 +146,17 @@ mod tests {
             topup_aborted_body("test-2"),
             "A top-up is required before making paid requests.\n$ pay topup --account test-2"
         );
+    }
+
+    #[test]
+    fn topup_rejects_evm_network_with_clear_error() {
+        let cmd = TopupCommand {
+            account: None,
+            sandbox: false,
+        };
+        let err = cmd.run(Some("sepolia")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not yet supported on EVM"));
+        assert!(msg.contains("sepolia"));
     }
 }

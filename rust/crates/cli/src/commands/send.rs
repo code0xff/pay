@@ -66,6 +66,7 @@ impl SendCommand {
         let recipient_input = self.recipient;
         let config = pay_core::Config::load().unwrap_or_default();
         let network = network_override.unwrap_or(pay_core::accounts::MAINNET_NETWORK);
+        reject_evm_network("send", network)?;
         let rpc_url = configured_rpc_url(&config);
         let fee_within = effective_fee_within(&amount, self.fee_within);
         let recipient = resolve_recipient_pubkey(&recipient_input, network)?;
@@ -115,6 +116,21 @@ impl SendCommand {
 
         Ok(())
     }
+}
+
+/// Reject EVM network slugs at command entry. `pay send` and `pay topup` are
+/// Solana-only today; without this guard a `--network sepolia` invocation
+/// would otherwise descend into Solana key/RPC paths and surface confusing
+/// errors (empty balances, `MemorySigner::from_bytes` failures, etc.).
+pub(crate) fn reject_evm_network(sub: &str, network: &str) -> pay_core::Result<()> {
+    if pay_core::accounts::is_evm_network_family(network) {
+        return Err(pay_core::Error::Config(format!(
+            "`pay {sub}` is not yet supported on EVM networks (got `{network}`). \
+             For now use a wallet like MetaMask to manage EVM balances; \
+             `pay account list` and `pay whoami` show them read-only."
+        )));
+    }
+    Ok(())
 }
 
 fn send_success_title(result: &pay_core::client::send::SendResult) -> String {
@@ -762,6 +778,30 @@ mod tests {
         };
 
         assert_eq!(send_success_title(&result), "Sent 1 USDC to to");
+    }
+
+    #[test]
+    fn reject_evm_network_blocks_evm_slugs_with_clear_message() {
+        for slug in ["ethereum", "base", "sepolia", "base-sepolia", "holesky"] {
+            let err = reject_evm_network("send", slug).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not yet supported on EVM networks"),
+                "missing guard message for {slug}: {msg}"
+            );
+            assert!(
+                msg.contains(slug),
+                "guard message should echo the slug `{slug}`: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_evm_network_allows_solana_slugs() {
+        for slug in ["mainnet", "devnet", "localnet"] {
+            assert!(reject_evm_network("send", slug).is_ok());
+            assert!(reject_evm_network("topup", slug).is_ok());
+        }
     }
 
     #[test]

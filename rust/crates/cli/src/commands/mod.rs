@@ -192,7 +192,7 @@ impl Command {
                 return cmd.run(network_override, account_override, verbose);
             }
             Command::Setup(cmd) => return cmd.run(),
-            Command::Topup(cmd) => return cmd.run(),
+            Command::Topup(cmd) => return cmd.run(network_override),
             Command::Server { command } => return command.run(keypair_override, sandbox),
             Command::Mcp => {
                 let rt = tokio::runtime::Builder::new_multi_thread()

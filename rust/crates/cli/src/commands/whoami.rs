@@ -115,7 +115,9 @@ impl WhoamiCommand {
         };
 
         match balance_result {
-            Ok(b) if b.tokens_unavailable => print_balance_unavailable("", Some(pubkey), &rpc_url),
+            Ok(b) if b.tokens_unavailable => {
+                print_balance_unavailable("", Some(pubkey), network, &rpc_url)
+            }
             Ok(b) => {
                 let any_nonzero = print_balances(&b, "");
                 // Only nudge the user to top up when they're looking at
@@ -125,7 +127,7 @@ impl WhoamiCommand {
                     print_topup_note();
                 }
             }
-            Err(_) => print_balance_unavailable("", Some(pubkey), &rpc_url),
+            Err(_) => print_balance_unavailable("", Some(pubkey), network, &rpc_url),
         }
 
         Ok(())
