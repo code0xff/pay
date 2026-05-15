@@ -22,10 +22,36 @@ pub struct NewCommand {
     /// Replace existing account.
     #[arg(long)]
     pub force: bool,
+
+    /// Chain family: `solana` (default) or `evm`. EVM generates a secp256k1
+    /// key and stores it under the OS keystore's `evm-key:` entries. Requires
+    /// `--network` to be set to an EVM slug (e.g. `sepolia`, `base`).
+    #[arg(long, value_name = "FAMILY")]
+    pub chain_family: Option<String>,
+
+    /// EVM network slug for `--chain-family evm`. Ignored for Solana, which
+    /// always provisions on mainnet from `pay account new`.
+    #[arg(long, value_name = "SLUG")]
+    pub network: Option<String>,
 }
 
 impl NewCommand {
     pub fn run(self) -> pay_core::Result<()> {
+        if self.chain_family.as_deref() == Some("evm") {
+            #[cfg(feature = "evm")]
+            {
+                return self.run_evm();
+            }
+            #[cfg(not(feature = "evm"))]
+            {
+                return Err(pay_core::Error::Config(
+                    "EVM accounts require the `evm` Cargo feature. Rebuild with \
+                     `cargo build -p pay --features evm`."
+                        .to_string(),
+                ));
+            }
+        }
+
         let (pubkey, backend_name) = create_account(
             &self.name,
             self.backend.as_deref(),
@@ -45,6 +71,34 @@ impl NewCommand {
             backend_name,
             completion.as_ref().map(|c| &c.received),
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "evm")]
+    fn run_evm(&self) -> pay_core::Result<()> {
+        let network = self.network.as_deref().ok_or_else(|| {
+            pay_core::Error::Config(
+                "`--chain-family evm` requires `--network <slug>` \
+                 (e.g. `sepolia`, `base`, `base-sepolia`)."
+                    .to_string(),
+            )
+        })?;
+        if !pay_core::accounts::is_evm_network_family(network) {
+            return Err(pay_core::Error::Config(format!(
+                "`{network}` is not a recognized EVM network slug. \
+                 Supported: ethereum, base, optimism, arbitrum, sepolia, \
+                 holesky, base-sepolia."
+            )));
+        }
+
+        let (address, backend_display) = create_evm_account(
+            &self.name,
+            network,
+            self.backend.as_deref(),
+            self.vault.as_deref(),
+            self.force,
+        )?;
+        print_evm_next_steps(&self.name, network, &address, backend_display);
         Ok(())
     }
 }
@@ -443,6 +497,123 @@ pub fn generate_keypair() -> (Vec<u8>, String) {
 
     let pubkey_b58 = bs58::encode(&verifying_key.to_bytes()).into_string();
     (keypair_bytes, pubkey_b58)
+}
+
+/// Generate a new secp256k1 keypair for `network`, store the 32-byte private
+/// key under the OS keystore's `evm-key:` entries, and persist the
+/// `chain_family: evm` entry in accounts.yml. Returns `(eip-55 address,
+/// backend_display_name)`.
+#[cfg(feature = "evm")]
+pub fn create_evm_account(
+    name: &str,
+    network: &str,
+    backend: Option<&str>,
+    vault: Option<&str>,
+    force: bool,
+) -> pay_core::Result<(String, &'static str)> {
+    use pay_core::chain::{ChainFamily, ChainSigner, EvmChainSigner};
+
+    let chain_id = match ChainFamily::from_network_slug(network) {
+        ChainFamily::Evm { chain_id } => chain_id,
+        _ => {
+            return Err(pay_core::Error::Config(format!(
+                "`{network}` is not an EVM network"
+            )));
+        }
+    };
+
+    let backend_id = match backend {
+        Some(b) => b.to_string(),
+        None => pick_backend()?,
+    };
+    let (ks, keystore_kind, backend_display, op_info) = build_keystore(&backend_id, vault)?;
+
+    if ks.evm_key_exists(name) && !force {
+        return Err(pay_core::Error::Config(format!(
+            "EVM key for `{name}` already exists in {backend_display}. \
+             Pass --force to replace it."
+        )));
+    }
+
+    let signer = EvmChainSigner::random(chain_id);
+    let priv_bytes = signer.to_private_key_bytes();
+    let address = signer.address();
+
+    let intent = pay_core::keystore::AuthIntent::create_account(name);
+    ks.import_evm_key_with_intent(name, &priv_bytes, &intent)
+        .map_err(|e| pay_core::Error::Config(format!("{e}")))?;
+
+    save_evm_account(
+        name,
+        network,
+        keystore_kind,
+        &address,
+        op_info
+            .as_ref()
+            .and_then(|i| i.vault.clone())
+            .or(vault.map(|v| v.to_string())),
+        op_info.as_ref().and_then(|i| i.account.clone()),
+    )?;
+
+    Ok((address, backend_display))
+}
+
+#[cfg(feature = "evm")]
+fn save_evm_account(
+    name: &str,
+    network: &str,
+    keystore: pay_core::accounts::Keystore,
+    address: &str,
+    vault: Option<String>,
+    account: Option<String>,
+) -> pay_core::Result<()> {
+    let mut accounts = pay_core::accounts::AccountsFile::load()?;
+    accounts.upsert(
+        network,
+        name,
+        pay_core::accounts::Account {
+            keystore,
+            active: false,
+            auth_required: Some(true),
+            pubkey: Some(address.to_string()),
+            vault,
+            account,
+            path: None,
+            secret_key_b58: None,
+            chain_family: Some("evm".to_string()),
+            secret_key_hex: None,
+            created_at: Some(chrono::Utc::now().to_rfc3339()),
+        },
+    );
+    accounts.save()
+}
+
+#[cfg(feature = "evm")]
+fn print_evm_next_steps(
+    name: &str,
+    network: &str,
+    address: &str,
+    backend_name: &str,
+) {
+    eprintln!();
+    eprintln!(
+        "  {} EVM account `{}` secured in {}",
+        "✔".green(),
+        name.green(),
+        backend_name.green()
+    );
+    eprintln!("  {} {} on {}", "address".dimmed(), address, network.green());
+    eprintln!();
+    crate::components::print_notice(
+        crate::components::NoticeLevel::Info,
+        "Fund the wallet",
+        &format!(
+            "EVM accounts can't be funded with `pay topup` yet — use a wallet \
+             like MetaMask or a {network} faucet, then re-run with:\n\
+             $ pay --network {network} --account {name} whoami",
+        ),
+    );
+    eprintln!();
 }
 
 #[cfg(test)]

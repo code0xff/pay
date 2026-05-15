@@ -130,6 +130,12 @@ impl EvmChainSigner {
     pub fn to_hex_key(&self) -> String {
         hex::encode(self.signer.credential().to_bytes())
     }
+
+    /// Export the raw 32-byte secp256k1 private key. Used when persisting to
+    /// an OS keystore so callers don't have to re-decode `to_hex_key()`.
+    pub fn to_private_key_bytes(&self) -> [u8; 32] {
+        self.signer.credential().to_bytes().into()
+    }
 }
 
 impl ChainSigner for EvmChainSigner {

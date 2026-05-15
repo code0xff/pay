@@ -15,6 +15,12 @@ pub struct DestroyCommand {
     #[arg(value_name = "NAME")]
     pub account: String,
 
+    /// Network slug the account lives under (`sepolia`, `base`, `localnet`,
+    /// …). Defaults to Solana mainnet; `--sandbox` is a shortcut for
+    /// `--network localnet`.
+    #[arg(long, value_name = "SLUG")]
+    pub network: Option<String>,
+
     /// Remove from the sandbox (localnet) network instead of mainnet.
     #[arg(long)]
     pub sandbox: bool,
@@ -28,7 +34,9 @@ impl DestroyCommand {
     pub fn run(self) -> pay_core::Result<()> {
         let mut accounts = AccountsFile::load()?;
 
-        let network = if self.sandbox {
+        let network: &str = if let Some(slug) = self.network.as_deref() {
+            slug
+        } else if self.sandbox {
             "localnet"
         } else {
             MAINNET_NETWORK
@@ -127,11 +135,19 @@ impl DestroyCommand {
         }
 
         // Delete from keystore backend
+        let is_evm = entry.is_evm();
         let ks = keystore_for_kind(&keystore_kind, op_account)?;
         if let Some(ks) = ks {
             let intent = pay_core::keystore::AuthIntent::delete_account(&self.account);
-            ks.delete_with_intent(&self.account, &intent)
-                .map_err(|e| pay_core::Error::Config(format!("{keystore_kind} delete: {e}")))?;
+            if is_evm {
+                // EVM accounts store under `evm-key:<name>` instead of
+                // `keypair:<name>`; the ed25519 delete would silently no-op.
+                ks.delete_evm_key_with_intent(&self.account, &intent)
+                    .map_err(|e| pay_core::Error::Config(format!("{keystore_kind} delete: {e}")))?;
+            } else {
+                ks.delete_with_intent(&self.account, &intent)
+                    .map_err(|e| pay_core::Error::Config(format!("{keystore_kind} delete: {e}")))?;
+            }
         } else {
             // File-based or ephemeral — don't delete user-managed files
             eprintln!(
@@ -140,19 +156,19 @@ impl DestroyCommand {
             );
         }
 
-        // Check if this was the active mainnet account before removing.
+        // Check if this was the active default account before removing.
         let was_default = accounts
             .default_account()
             .map(|(name, _)| name == self.account)
             .unwrap_or(false);
 
-        accounts.remove(MAINNET_NETWORK, &self.account);
+        accounts.remove(network, &self.account);
 
-        // If we deleted the mainnet-default and there are remaining
-        // accounts, prompt for a new active account.
+        // If we deleted the active default and there are remaining
+        // accounts on this network, prompt for a new active account.
         let remaining: Vec<String> = accounts
             .accounts
-            .get(MAINNET_NETWORK)
+            .get(network)
             .map(|net| net.keys().cloned().collect())
             .unwrap_or_default();
 
@@ -161,14 +177,14 @@ impl DestroyCommand {
             if has_tty {
                 let selection =
                     dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                        .with_prompt("Choose new default account (mainnet)")
+                        .with_prompt(format!("Choose new default account ({network})"))
                         .items(&remaining)
                         .default(0)
                         .interact()
                         .ok();
 
                 if let Some(idx) = selection {
-                    accounts.set_active(MAINNET_NETWORK, &remaining[idx]);
+                    accounts.set_active(network, &remaining[idx]);
                 }
             }
         }
@@ -177,7 +193,7 @@ impl DestroyCommand {
 
         let mainnet_empty = accounts
             .accounts
-            .get(MAINNET_NETWORK)
+            .get(network)
             .is_none_or(|net| net.is_empty());
 
         if mainnet_empty {
