@@ -14,6 +14,7 @@ use axum::middleware;
 use axum::routing::{any, get};
 use owo_colors::OwoColorize;
 use pay_core::PaymentState;
+use pay_core::server::in_flight::InFlight;
 use pay_core::server::session::SessionMpp;
 use pay_core::server::telemetry::FeePayerWallet;
 use pay_core::server::x402_facilitator::FacilitatorClient;
@@ -25,6 +26,11 @@ use solana_mpp::server::Mpp;
 struct EvmAppState {
     apis: Arc<Vec<ApiSpec>>,
     facilitator: Arc<FacilitatorClient>,
+    /// Per-node in-flight `(chain_id, from, nonce)` lock; the EVM x402
+    /// middleware uses it to close the race window between facilitator
+    /// settlement and on-chain mining. Naturally bounded by the number of
+    /// concurrent payments, so no LRU eviction is required.
+    in_flight: Arc<InFlight>,
 }
 
 impl PaymentState for EvmAppState {
@@ -51,6 +57,9 @@ impl PaymentState for EvmAppState {
     }
     fn fee_payer_wallet(&self) -> Option<&FeePayerWallet> {
         None
+    }
+    fn evm_in_flight(&self) -> Option<&InFlight> {
+        Some(&self.in_flight)
     }
 }
 
@@ -86,14 +95,30 @@ pub fn run(bind: &str, api: ApiSpec) -> pay_core::Result<()> {
                 .to_string(),
         )
     })?;
+    // Phase 11-1 boot guard: the middleware re-checks the facilitator's
+    // settle response against an on-chain receipt, which needs an EVM RPC
+    // URL. Fail fast at startup rather than discovering this on the first
+    // paid request.
+    let rpc_url = operator
+        .rpc_url
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| {
+            pay_core::Error::Config(
+                "EVM x402 mode requires `operator.rpc_url` so the gateway can verify on-chain receipts after the facilitator settles"
+                    .to_string(),
+            )
+        })?;
 
     let facilitator = Arc::new(FacilitatorClient::new(facilitator_url));
+    let in_flight = Arc::new(InFlight::new());
 
     let bind = bind.to_string();
     let api_for_router = api.clone();
     let state = EvmAppState {
         apis: Arc::new(vec![api_for_router]),
         facilitator,
+        in_flight,
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -102,7 +127,7 @@ pub fn run(bind: &str, api: ApiSpec) -> pay_core::Result<()> {
         .map_err(|e| pay_core::Error::Config(format!("Failed to build tokio runtime: {e}")))?;
 
     rt.block_on(async move {
-        print_banner(network, recipient, facilitator_url, &state.apis[0]);
+        print_banner(network, recipient, facilitator_url, rpc_url, &state.apis[0]);
 
         let api_for_fallback = state.apis[0].clone();
         let mut app: axum::Router<EvmAppState> = axum::Router::new()
@@ -155,7 +180,13 @@ pub fn run(bind: &str, api: ApiSpec) -> pay_core::Result<()> {
     })
 }
 
-fn print_banner(network: &str, recipient: &str, facilitator_url: &str, api: &ApiSpec) {
+fn print_banner(
+    network: &str,
+    recipient: &str,
+    facilitator_url: &str,
+    rpc_url: &str,
+    api: &ApiSpec,
+) {
     let banner = crate::components::render_pay_banner(crate::components::PAY_SH_TAGLINE.dimmed());
     if !banner.is_empty() {
         eprintln!("{banner}");
@@ -168,6 +199,7 @@ fn print_banner(network: &str, recipient: &str, facilitator_url: &str, api: &Api
     );
     eprintln!("{}\t{}", "operator".dimmed(), recipient);
     eprintln!("{}\t{}", "facilitator".dimmed(), facilitator_url);
+    eprintln!("{}\t{}", "rpc".dimmed(), rpc_url);
     eprintln!();
     let metered = api
         .endpoints

@@ -13,6 +13,16 @@
 //! - Verification and on-chain settlement happen via the facilitator's
 //!   `/verify` and `/settle` HTTP endpoints — the gateway never holds an
 //!   EVM key and never pays gas itself.
+//! - Phase 11 hardening:
+//!   1. an in-flight `(chain_id, from, nonce)` lock guards the window
+//!      between `facilitator.settle` and the on-chain mining;
+//!   2. before contacting the facilitator the gateway calls the EIP-3009
+//!      `authorizationState(from, nonce)` view on the USDC contract — this
+//!      is the authoritative source of truth for already-mined replays;
+//!   3. after the facilitator says "settled", the gateway reads the
+//!      on-chain receipt via `operator.rpc_url`, decodes the ERC-20
+//!      `Transfer` log, and forwards the upstream call only if the receipt
+//!      confirms the expected recipient + amount.
 //!
 //! Gated behind the `evm` feature so a Solana-only build pulls none of the
 //! EVM stack.
@@ -23,12 +33,14 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use serde_json::json;
+use solana_mpp::PAYMENT_RECEIPT_HEADER;
 use solana_x402::{PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER, X402_V1_PAYMENT_HEADER};
 
 use crate::PaymentState;
 use crate::accounts::is_evm_network_family;
 use crate::chain::ChainFamily;
 use crate::client::balance::evm_stablecoin_address;
+use crate::server::in_flight::{InFlight, NonceKey};
 use crate::server::metering::{self, RequestProperties};
 use crate::server::telemetry;
 use crate::server::x402_facilitator::FacilitatorClient;
@@ -61,7 +73,7 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
     };
 
     // The EVM middleware is mounted only when `is_evm_x402_spec(...)` accepted
-    // the YAML, so reaching any of the next three failure branches means the
+    // the YAML, so reaching any of the next four failure branches means the
     // config drifted out from under the dispatcher. Fail closed — a payment
     // middleware that silently passes free traffic on misconfig is a
     // monetization-bypass hazard.
@@ -94,11 +106,33 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
         }
     };
 
+    // Phase 11-1 dependency: receipt verification needs an EVM RPC URL.
+    // `evm_x402_start::run` rejects boot when `operator.rpc_url` is missing,
+    // so reaching here without a URL means a third-party caller mounted the
+    // middleware without going through the boot guard.
+    let rpc_url = match operator.rpc_url.as_deref() {
+        Some(u) if !u.is_empty() => u,
+        _ => {
+            return internal_error(
+                "EVM x402 server requires operator.rpc_url for on-chain receipt verification",
+            );
+        }
+    };
+
     let facilitator = match state.facilitator() {
         Some(f) => f,
         None => {
             return internal_error(
                 "EVM x402 server requires operator.facilitator_url to be configured",
+            );
+        }
+    };
+
+    let in_flight = match state.evm_in_flight() {
+        Some(n) => n,
+        None => {
+            return internal_error(
+                "EVM x402 server is missing the in-flight nonce lock (gateway boot bug)",
             );
         }
     };
@@ -130,7 +164,14 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
     let meter = metering_config.unwrap();
     let props = extract_request_properties(&headers, &path);
     let variant_hint = extract_variant_hint(&path);
-    let amount_usd = resolve_amount_usd(meter, &props, variant_hint.as_deref());
+    // Phase 11-4: surface metering misconfig instead of silently emitting
+    // 0.01 USD envelopes when `resolve_price` returns None.
+    let amount_usd = match resolve_amount_usd(meter, &props, variant_hint.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            return internal_error(&format!("price_resolution_failed: {e}"));
+        }
+    };
 
     let currency_symbol = pick_currency_symbol(operator);
     let requirements = match build_evm_requirements(
@@ -163,6 +204,8 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
         Some(header) => {
             handle_payment(
                 facilitator,
+                rpc_url,
+                in_flight,
                 header,
                 requirements,
                 subdomain,
@@ -227,11 +270,14 @@ fn challenge_response(
 
 #[tracing::instrument(
     name = "evm_x402_payment",
-    skip(facilitator, header, requirements, req, next),
+    skip(facilitator, in_flight, header, requirements, req, next),
     fields(subdomain = %subdomain, path = %path)
 )]
+#[allow(clippy::too_many_arguments)]
 async fn handle_payment(
     facilitator: &FacilitatorClient,
+    rpc_url: &str,
+    in_flight: &InFlight,
     header: String,
     requirements: serde_json::Value,
     subdomain: &str,
@@ -246,6 +292,78 @@ async fn handle_payment(
             return verification_failed_response(&e);
         }
     };
+
+    // Phase 11-2a: extract the (chain_id, from, nonce) key and pull the
+    // expected receipt fields up front. We need both for the in-flight
+    // guard and for the on-chain `authorizationState` check below.
+    let nonce_key = match NonceKey::from_envelope(&payment_payload, &requirements) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!(error = %e, "EVM x402 envelope missing nonce metadata");
+            return verification_failed_response(&format!("malformed payment envelope: {e}"));
+        }
+    };
+    let expected = match extract_receipt_expectations(&requirements) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!(error = %e, "EVM requirements missing fields needed for receipt check");
+            return internal_error(&format!("receipt_check_setup_failed: {e}"));
+        }
+    };
+
+    // Phase 11-2b: take the in-flight slot. This is the only thing that
+    // closes the window between `facilitator.settle` kicking off and the
+    // on-chain authorization-state flipping to `true` — both the gateway-
+    // local `authorizationState` view and Phase 11-1's receipt check are
+    // blind to a duplicate that arrives *during* that window. The guard
+    // releases automatically on every exit path (including the unwind).
+    let _guard = match in_flight.try_acquire(nonce_key) {
+        Some(g) => g,
+        None => {
+            telemetry::record_settlement_error(
+                "x402_evm",
+                subdomain,
+                path,
+                "in_flight_duplicate",
+                false,
+            );
+            return verification_failed_response(
+                "payment authorization is already being processed",
+            );
+        }
+    };
+
+    // Phase 11-2c: the authoritative replay check. EIP-3009 maintains a
+    // permanent `_authorizationStates[from][nonce]` flag on the token
+    // contract; if it's already `true`, the second `transferWithAuthorization`
+    // call would revert. We pre-check it so we don't have to pay a
+    // facilitator round trip (and a potential receipt poll) for a no-op.
+    match check_authorization_state(
+        rpc_url,
+        &expected.asset,
+        nonce_key.from,
+        nonce_key.nonce,
+    )
+    .await
+    {
+        Ok(true) => {
+            telemetry::record_settlement_error(
+                "x402_evm",
+                subdomain,
+                path,
+                "nonce_already_used_on_chain",
+                false,
+            );
+            return verification_failed_response(
+                "payment authorization already used on-chain (replay)",
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "authorizationState eth_call failed");
+            return internal_error(&format!("authorization_state_check_failed: {e}"));
+        }
+    }
 
     match facilitator.verify(&payment_payload, &requirements).await {
         Ok(resp) if !resp.is_valid => {
@@ -277,18 +395,61 @@ async fn handle_payment(
         return verification_failed_response(&reason);
     }
 
-    let tx_hash = settle.transaction.unwrap_or_default();
+    let tx_hash = match settle.transaction.as_deref() {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => {
+            telemetry::record_settlement_error(
+                "x402_evm",
+                subdomain,
+                path,
+                "missing_tx_hash",
+                false,
+            );
+            return verification_failed_response(
+                "facilitator reported settlement success but returned no transaction hash",
+            );
+        }
+    };
+
+    // Phase 11-1: independent on-chain check that the facilitator actually
+    // moved the expected funds. Without this, a misbehaving facilitator can
+    // pair `success:true` with an underpaid (or non-existent) transfer.
+    // `expected` was already extracted at the top of `handle_payment` so the
+    // authorization-state pre-check and the receipt check use the same
+    // requirements view.
+    if let Err(e) = verify_onchain_receipt(
+        rpc_url,
+        &tx_hash,
+        &expected.recipient,
+        &expected.asset,
+        expected.min_amount_raw,
+    )
+    .await
+    {
+        telemetry::record_settlement_error("x402_evm", subdomain, path, &e, false);
+        return verification_failed_response(&e);
+    }
+
     tracing::info!(
         subdomain = %subdomain,
         path = %path,
         transaction = %tx_hash,
-        "EVM x402 payment settled via facilitator — forwarding"
+        "EVM x402 payment settled + receipt verified — forwarding"
     );
     telemetry::record_payment_collected("x402_evm", subdomain, path, None, &tx_hash);
 
-    let response = next.run(req).await;
+    let mut response = next.run(req).await;
     let status = response.status();
     telemetry::record_paid_request_completed("x402_evm", subdomain, path, status, None);
+
+    // Phase 11-3: expose the tx hash to the client so the CLI receipt
+    // collector (already wired for Solana via the same header constant)
+    // can show it.
+    if let Ok(value) = axum::http::HeaderValue::from_str(&tx_hash) {
+        response
+            .headers_mut()
+            .insert(PAYMENT_RECEIPT_HEADER, value);
+    }
     response
 }
 
@@ -375,15 +536,192 @@ fn usdc_eip712_domain(network_slug: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// Subset of `requirements` we re-check against the on-chain receipt.
+#[derive(Debug)]
+struct ReceiptExpectations {
+    recipient: String,
+    asset: String,
+    min_amount_raw: u128,
+}
+
+fn extract_receipt_expectations(
+    requirements: &serde_json::Value,
+) -> Result<ReceiptExpectations, String> {
+    let recipient = requirements
+        .get("payTo")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "requirements.payTo missing".to_string())?
+        .to_string();
+    let asset = requirements
+        .get("asset")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "requirements.asset missing".to_string())?
+        .to_string();
+    let amount_str = requirements
+        .get("amount")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "requirements.amount missing".to_string())?;
+    let min_amount_raw: u128 = amount_str
+        .parse()
+        .map_err(|e| format!("requirements.amount `{amount_str}` is not a u128: {e}"))?;
+    Ok(ReceiptExpectations {
+        recipient,
+        asset,
+        min_amount_raw,
+    })
+}
+
+/// Read the transaction receipt off-chain via JSON-RPC and confirm the
+/// expected ERC-20 `Transfer(_, recipient, value)` log is present with
+/// `value >= expected_min_amount_raw`. Returns `Ok(())` on success; any
+/// other outcome (missing tx, reverted, wrong recipient, underpaid) maps to
+/// a verification failure with a descriptive message.
+async fn verify_onchain_receipt(
+    rpc_url: &str,
+    tx_hash: &str,
+    expected_recipient: &str,
+    expected_asset: &str,
+    expected_min_amount_raw: u128,
+) -> Result<(), String> {
+    use alloy::primitives::{Address, B256, U256, keccak256};
+    use alloy::providers::{Provider, ProviderBuilder};
+    use std::str::FromStr;
+
+    let parsed_url: reqwest::Url = rpc_url
+        .parse()
+        .map_err(|e| format!("invalid operator.rpc_url `{rpc_url}`: {e}"))?;
+    let provider = ProviderBuilder::new().connect_http(parsed_url);
+
+    let tx_hash_clean = tx_hash.trim();
+    let tx_hash_b256 = B256::from_str(tx_hash_clean)
+        .map_err(|e| format!("settle returned invalid tx hash `{tx_hash_clean}`: {e}"))?;
+
+    let receipt = provider
+        .get_transaction_receipt(tx_hash_b256)
+        .await
+        .map_err(|e| format!("eth_getTransactionReceipt failed: {e}"))?
+        .ok_or_else(|| {
+            format!("transaction {tx_hash_clean} not yet visible — refuse to forward")
+        })?;
+
+    if !receipt.status() {
+        return Err(format!(
+            "transaction {tx_hash_clean} reverted on-chain; refusing to grant access"
+        ));
+    }
+
+    let asset_addr = Address::from_str(expected_asset)
+        .map_err(|e| format!("requirements.asset `{expected_asset}` invalid: {e}"))?;
+    let recipient_addr = Address::from_str(expected_recipient)
+        .map_err(|e| format!("requirements.payTo `{expected_recipient}` invalid: {e}"))?;
+
+    let transfer_topic = keccak256("Transfer(address,address,uint256)".as_bytes());
+    let expected_to_topic = address_as_topic(recipient_addr);
+    let expected_min = U256::from(expected_min_amount_raw);
+
+    let mut best_value: Option<U256> = None;
+    for log in receipt.inner.logs() {
+        if log.address() != asset_addr {
+            continue;
+        }
+        let topics = log.topics();
+        let Some(first) = topics.first() else {
+            continue;
+        };
+        if first.as_slice() != transfer_topic.as_slice() {
+            continue;
+        }
+        let Some(to_topic) = topics.get(2) else {
+            continue;
+        };
+        if to_topic.as_slice() != expected_to_topic.as_slice() {
+            continue;
+        }
+        let data = log.data().data.as_ref();
+        if data.len() != 32 {
+            continue;
+        }
+        let value = U256::from_be_slice(data);
+        best_value = Some(match best_value {
+            Some(prev) if prev > value => prev,
+            _ => value,
+        });
+    }
+
+    let value = best_value.ok_or_else(|| {
+        format!(
+            "tx {tx_hash_clean} has no ERC-20 Transfer({expected_asset} → {expected_recipient}) log"
+        )
+    })?;
+    if value < expected_min {
+        return Err(format!(
+            "tx {tx_hash_clean} underpaid: on-chain value {value} < expected {expected_min}"
+        ));
+    }
+    Ok(())
+}
+
+fn address_as_topic(addr: alloy::primitives::Address) -> alloy::primitives::B256 {
+    let mut bytes = [0u8; 32];
+    bytes[12..].copy_from_slice(addr.as_slice());
+    alloy::primitives::B256::from(bytes)
+}
+
+// EIP-3009 standardizes a `authorizationState(authorizer, nonce) -> bool`
+// view on every token that supports `transferWithAuthorization`. We call it
+// before contacting the facilitator so a replay of an already-mined
+// authorization is rejected without doing any off-gateway work.
+alloy::sol! {
+    #[sol(rpc)]
+    interface IEip3009 {
+        function authorizationState(address authorizer, bytes32 nonce)
+            external view returns (bool);
+    }
+}
+
+async fn check_authorization_state(
+    rpc_url: &str,
+    asset_hex: &str,
+    from: [u8; 20],
+    nonce: [u8; 32],
+) -> Result<bool, String> {
+    use alloy::primitives::{Address, B256};
+    use alloy::providers::ProviderBuilder;
+    use std::str::FromStr;
+
+    let parsed_url: reqwest::Url = rpc_url
+        .parse()
+        .map_err(|e| format!("invalid operator.rpc_url `{rpc_url}`: {e}"))?;
+    let provider = ProviderBuilder::new().connect_http(parsed_url);
+
+    let asset_addr = Address::from_str(asset_hex)
+        .map_err(|e| format!("requirements.asset `{asset_hex}` invalid: {e}"))?;
+    let from_addr = Address::from(from);
+    let nonce_b = B256::from(nonce);
+
+    IEip3009::new(asset_addr, &provider)
+        .authorizationState(from_addr, nonce_b)
+        .call()
+        .await
+        .map_err(|e| format!("authorizationState eth_call failed: {e}"))
+}
+
+/// Resolve the per-endpoint USD price. Phase 11-4: returning `Err` (instead
+/// of silently substituting 0.01 USD) makes a metering misconfig visible as
+/// a 500 rather than turning every request into a 1¢ charge.
 fn resolve_amount_usd(
     meter: &pay_types::metering::Metering,
     props: &RequestProperties,
     variant_hint: Option<&str>,
-) -> f64 {
-    metering::resolve_price(meter, props, variant_hint, None)
-        .and_then(|p| p.dimensions.first().cloned())
-        .map(|d| d.price_usd / d.scale.max(1) as f64)
-        .unwrap_or(0.01)
+) -> Result<f64, String> {
+    let price = metering::resolve_price(meter, props, variant_hint, None)
+        .ok_or_else(|| "metering returned no price for this request".to_string())?;
+    let dim = price
+        .dimensions
+        .first()
+        .ok_or_else(|| "metering price has no dimensions".to_string())?;
+    let scale = dim.scale.max(1) as f64;
+    Ok(dim.price_usd / scale)
 }
 
 fn extract_request_properties(headers: &HeaderMap, _path: &str) -> RequestProperties {
@@ -548,5 +886,57 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("u64 base-unit ceiling"));
+    }
+
+    #[test]
+    fn extract_receipt_expectations_parses_required_fields() {
+        let req = serde_json::json!({
+            "payTo": "0x2222222222222222222222222222222222222222",
+            "asset": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+            "amount": "100000"
+        });
+        let e = extract_receipt_expectations(&req).expect("parse");
+        assert_eq!(e.recipient, "0x2222222222222222222222222222222222222222");
+        assert_eq!(e.asset, "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238");
+        assert_eq!(e.min_amount_raw, 100_000);
+    }
+
+    #[test]
+    fn extract_receipt_expectations_rejects_missing_amount() {
+        let req = serde_json::json!({
+            "payTo": "0x22",
+            "asset": "0x1c",
+        });
+        let err = extract_receipt_expectations(&req).unwrap_err();
+        assert!(err.contains("amount"));
+    }
+
+    #[test]
+    fn address_as_topic_left_pads_address() {
+        use alloy::primitives::Address;
+        let addr = Address::from([0xab; 20]);
+        let topic = address_as_topic(addr);
+        let bytes = topic.as_slice();
+        assert_eq!(&bytes[..12], &[0u8; 12]);
+        assert_eq!(&bytes[12..], &[0xab; 20]);
+    }
+
+    fn empty_metering() -> pay_types::metering::Metering {
+        pay_types::metering::Metering {
+            dimensions: Vec::new(),
+            variants: Vec::new(),
+            sku_tiers: Vec::new(),
+            splits: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_amount_usd_errors_when_metering_yields_no_price() {
+        // An empty metering config produces no resolved price, which Phase 11-4
+        // now surfaces as an explicit error rather than the old 0.01 USD
+        // silent fallback.
+        let meter = empty_metering();
+        let err = resolve_amount_usd(&meter, &RequestProperties::default(), None).unwrap_err();
+        assert!(err.contains("no price"), "got: {err}");
     }
 }

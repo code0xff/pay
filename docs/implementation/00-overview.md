@@ -41,7 +41,7 @@ Phase 1–10 은 "기능 표면" 을 완료했지만, 감사 결과 **운영 가
 
 | Phase | 내용 | 우선순위 | 상태 |
 |-------|------|--------|------|
-| **11** | EVM x402 서버 강화 (on-chain receipt 검증, nonce 재사용 차단, tx_hash 헤더, 가격 fallback 제거) | P0 | 설계 완료 |
+| **11** | EVM x402 서버 강화 (on-chain receipt 검증, nonce 재사용 차단, tx_hash 헤더, 가격 fallback 제거) | P0 | 구현 완료 |
 | **12** | EVM 결제 UX 동등화 (`pay send`/`topup` EVM 분기, `account/new` 후처리 분리, import 잔액 표시, facilitator 에러 매핑) | P0+P1 | 설계 완료 |
 | **13** | EVM x402 프로토콜 정합성 (EIP-712 도메인 on-chain 조회, typed envelope builder, decimals 테이블, v1 명시 거절, 다중 accepts, 후보 선택 강화) | P1+P2 | 설계 완료 |
 

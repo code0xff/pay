@@ -138,5 +138,10 @@ x402-chain-eip155 = { version = "1.4", default-features = false, features = [
 x402-types = "1.4"
 hex = "0.4"
 
+# EVM x402 gateway hardening (Phase 11): non-poisoning mutex guarding the
+# in-flight `(chain_id, from, nonce)` HashSet. Optional behind the `evm`
+# feature flag so Solana-only builds don't pull it in.
+parking_lot = "0.12"
+
 # [patch."https://github.com/solana-foundation/mpp-sdk"]
 # solana-mpp = { path = "../../mpp-sdk/rust" }

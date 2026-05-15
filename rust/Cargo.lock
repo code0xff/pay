@@ -7291,6 +7291,7 @@ dependencies = [
  "hmac 0.12.1",
  "md-5",
  "openssl-sys",
+ "parking_lot 0.12.5",
  "pay-keystore",
  "pay-types",
  "percent-encoding 2.3.2",

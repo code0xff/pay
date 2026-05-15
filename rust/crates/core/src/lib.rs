@@ -77,4 +77,13 @@ pub trait PaymentState: Clone + Send + Sync + 'static {
     fn fee_payer_wallet(&self) -> Option<&server::telemetry::FeePayerWallet> {
         None
     }
+    /// EVM in-flight `(chain_id, from, nonce)` lock used to close the race
+    /// between `facilitator.settle` kicking off and the on-chain authorization
+    /// state flipping to `true`. `None` for Solana-only gateways. The EVM
+    /// x402 middleware requires `Some(...)` and will fail closed when the
+    /// gateway forgot to wire it.
+    #[cfg(feature = "evm")]
+    fn evm_in_flight(&self) -> Option<&server::in_flight::InFlight> {
+        None
+    }
 }

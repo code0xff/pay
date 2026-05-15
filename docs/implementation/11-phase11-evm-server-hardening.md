@@ -9,7 +9,7 @@ Phase 6 에서 도입된 EVM x402 게이트웨이는 facilitator 의 `verify`/`s
 | 항목 | 현재 동작 | 위험 |
 |-----|--------|------|
 | settle 응답을 그대로 신뢰 | facilitator 가 `success:true` 면 통과 | 악성/오작동 facilitator → 무료 트래픽 통과 |
-| `(from, nonce)` 재사용 검사 없음 | 동시 두 요청에 같은 결제 헤더 → 둘 다 forward | 한 결제로 N 회 통과 |
+| `(from, nonce)` 재사용 검사 없음 | facilitator 가 같은 envelope 에 idempotent 하게 같은 tx hash 를 반환하면 통과 | 한 결제로 N 회 통과 |
 | `tx_hash` 응답 헤더 미부착 | 텔레메트리에만 기록 | 클라이언트가 영수증 회수 불가 |
 | `resolve_amount_usd` 가 0.01 USD silent fallback | 가격 조회 실패 = 1¢ 결제 | 모니터링 누락 시 무료 결제로 둔갑 |
 
@@ -136,67 +136,131 @@ fn evm_rpc_url(&self, network: &str) -> Option<&str>;
 
 ## 11-2. `(from, nonce)` 재사용 방지
 
-### 위협 모델
+### 위협 모델 — 두 단계로 분리
 
-x402 EIP-3009 envelope 의 `from` + `nonce` 는 facilitator 단에서 on-chain
-재사용 방지가 작동한다 (`transferWithAuthorization` 이 nonce 를 컨트랙트
-storage 에 기록). **그러나** 게이트웨이는 verify→settle 두 번의 HTTP 호출
-사이에 사용자가 동일 헤더로 다른 요청을 보내면 두 번 다 forwarding 한다.
-facilitator 가 두 번째 settle 을 거절하더라도, **첫 번째 forward 는 이미
-끝났다**. → 한 결제로 두 API 호출 통과 가능.
+x402 EIP-3009 envelope 의 nonce 는 **USDC 컨트랙트의 `_authorizationStates[from][nonce]`** 에
+영구히 기록된다. `transferWithAuthorization` 이 두 번째로 호출되면 contract
+가 revert. 그러나 게이트웨이가 *forward 결정* 을 내려야 하는 시점에 그 권위
+적 상태가 항상 일치하지 않는다.
 
-### 변경 설계
+```
+T0   : envelope E 도착 → contract state = false → 통과 ✓
+T0+1 : facilitator.settle → tx broadcast, 아직 mining 안 됨
+T0+2 : 같은 envelope E 도착 → state 여전히 false → 또 통과 ✗
+...
+T+12s: tx mined → state = true (그제서야)
+```
 
-`AppState` 에 in-memory LRU 추가:
+mining 윈도우 (Ethereum 12s, Base 2s) 동안은 on-chain 권위만으로도 부족.
+facilitator 가 idempotent 하게 같은 tx_hash 를 `success:true` 로 반환하면
+Phase 11-1 receipt 검증도 통과해버린다 — 같은 결제로 두 번 forward.
+
+따라서 두 가지 보호를 **모두** 적용한다.
+
+| 시점 | 위협 | 보호 |
+|------|------|------|
+| mining 후 sequential replay | nonce 가 already-used | `authorizationState(from, nonce)` |
+| mining 윈도우 내 parallel replay | gateway 자체 race | in-flight `HashSet<NonceKey>` |
+
+### 변경 설계 — InFlight + authorizationState
+
+**(1) In-flight HashSet** — 처리 중인 `(chain_id, from, nonce)` 만 보유.
+용량은 동시 처리 결제 수만큼 (수십~수천), guard 가 Drop 시 자동 해제 →
+eviction 우회 공격 불가능.
 
 ```rust
-use lru::LruCache;
-use parking_lot::Mutex;
-use std::num::NonZeroUsize;
-
-pub struct NoncesSeen {
-    inner: Mutex<LruCache<NonceKey, ()>>,
+pub struct InFlight {
+    set: parking_lot::Mutex<HashSet<NonceKey>>,
 }
-#[derive(Hash, Eq, PartialEq)]
-struct NonceKey {
-    chain_id: u64,
-    from: [u8; 20],
-    nonce: [u8; 32],
+pub struct InFlightGuard<'a> {
+    owner: &'a InFlight,
+    key: NonceKey,
 }
-impl NoncesSeen {
-    pub fn new(capacity: usize) -> Self { /* NonZeroUsize::new(capacity) */ }
-    /// Returns true on first insert, false if already seen.
-    pub fn insert(&self, key: NonceKey) -> bool {
-        let mut g = self.inner.lock();
-        if g.contains(&key) { return false; }
-        g.put(key, ());
-        true
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.owner.set.lock().remove(&self.key);
     }
+}
+impl InFlight {
+    pub fn new() -> Self { Self { set: Mutex::new(HashSet::new()) } }
+    pub fn try_acquire(&self, key: NonceKey) -> Option<InFlightGuard<'_>> {
+        let mut g = self.set.lock();
+        if !g.insert(key) { return None; }
+        Some(InFlightGuard { owner: self, key })
+    }
+}
+```
+
+**(2) On-chain `authorizationState`** — EIP-3009 표준 인터페이스. alloy
+`sol!` 매크로로 호출. 권위적 ground truth.
+
+```rust
+alloy::sol! {
+    #[sol(rpc)]
+    interface IEip3009 {
+        function authorizationState(address authorizer, bytes32 nonce)
+            external view returns (bool);
+    }
+}
+
+async fn check_authorization_state(
+    rpc_url: &str,
+    asset: alloy::primitives::Address,
+    from: alloy::primitives::Address,
+    nonce: alloy::primitives::B256,
+) -> Result<bool, String> {
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    IEip3009::new(asset, &provider)
+        .authorizationState(from, nonce)
+        .call()
+        .await
+        .map_err(|e| format!("authorizationState eth_call failed: {e}"))
 }
 ```
 
 ### 통합 지점
 
-`handle_payment` 첫 단계 (decode 직후):
+`handle_payment` 흐름:
 
-```rust
-let key = NonceKey::from_payload(&payment_payload).map_err(...)?;
-if !state.nonces_seen().insert(key) {
-    telemetry::record_settlement_error("x402_evm", subdomain, path, "duplicate_nonce", false);
-    return verification_failed_response("payment already used (duplicate nonce)");
-}
+```
+1. decode envelope → NonceKey
+2. in_flight.try_acquire(key) — guard (drop 시 자동 해제)
+     │ None → "payment already being processed" 거절
+3. authorizationState(asset, from, nonce)
+     │ true → "nonce already used on-chain" 거절
+     │ Err → internal_error (fail-closed)
+4. facilitator.verify
+5. facilitator.settle
+6. verify_onchain_receipt   ← Phase 11-1
+7. forward (guard Drop)
 ```
 
-`NonceKey::from_payload` 는 envelope 에서 `payload.authorization.from` /
-`payload.authorization.nonce` / `requirements.network` 의 chain_id 를 추출.
-형식 오류 시 verification_failed → 즉시 거절.
+### 왜 LRU 가 아닌가
 
-### 사이즈 / TTL
+| 시나리오 | LRU | InFlight + authState |
+|---------|-----|---------------------|
+| Mining 후 replay | eviction 시 ✗ | ✓ (authState) |
+| Mining 윈도우 내 parallel | ✓ (mutex) | ✓ (lock) |
+| 용량 한계 우회 공격 | **✗** | ✓ (lock set 은 동시 처리 수만큼) |
+| facilitator idempotent (같은 tx_hash 재반환) | LRU 살아있어야 catch | ✓ (authState 가 항상 catch) |
+| Cluster 일관성 | 노드별 | authState=자동 / lock=노드별 |
+| RPC 비용 | 0 | +1 `eth_call` per request |
 
-- 기본 capacity: 50,000 (단일 서버 기준 ~수십분 트래픽)
-- TTL 은 LRU 만으로 충분 — EIP-3009 의 `validAfter`/`validBefore` 가 이미
-  envelope 단에서 시간 윈도를 좁히기 때문.
-- 클러스터링 시 Redis 백엔드는 별도 트랙(Phase 14 후보)으로 분리.
+LRU 의 본질적 약점 — 50,000 entries 를 attacker 가 50,001번째 noise 로
+밀어내면 evict → replay 가능 — 을 in-flight set 은 **동시 처리 수에 비례**
+하므로 우회 불가능. 권위적 검사는 on-chain 에 위임.
+
+### 클러스터 동작
+
+In-flight lock 은 노드별:
+
+- 다른 노드가 같은 envelope 처리 시도 → 둘 다 facilitator 호출 →
+  facilitator 가 두 번 broadcast → 컨트랙트가 한 개만 mine, 나머지 revert
+  → Phase 11-1 의 `receipt.status() == false` 가 reverted 거절.
+
+안전성은 동등 (한 결제 = 한 forward), 단 facilitator 호출 1회 낭비. 클러스터
+용 distributed lock (Redis SETNX 등) 은 비용/복잡도 대비 효익이 낮아
+별도 트랙으로 미룬다.
 
 ---
 
@@ -280,13 +344,13 @@ let amount_usd = match resolve_amount_usd(meter, &props, variant_hint.as_deref()
 
 | 파일 | 유형 | 변경 |
 |------|------|------|
-| `rust/crates/core/src/server/evm_x402_payment.rs` | 수정 | `verify_onchain_receipt`, NonceKey 통합, `PAYMENT-RECEIPT` 헤더, `resolve_amount_usd` Result 화 |
-| `rust/crates/core/src/server/nonces.rs` | **신규** | `NoncesSeen` (LruCache 기반) |
-| `rust/crates/core/src/server/mod.rs` | 수정 | `pub mod nonces;` |
-| `rust/crates/core/src/lib.rs` | 수정 | `PaymentState::evm_rpc_url`, `PaymentState::nonces_seen` 추가 |
-| `rust/crates/cli/src/commands/server/evm_x402_start.rs` | 수정 | `rpc_url` 미설정 시 부팅 거절, `NoncesSeen::new(50_000)` 주입 |
-| `rust/Cargo.toml` | 수정 | `lru = "0.12"`, `parking_lot = "0.12"` workspace 의존성 |
-| `rust/crates/core/Cargo.toml` | 수정 | 위 두 의존성을 `evm` feature 옵셔널로 추가 |
+| `rust/crates/core/src/server/evm_x402_payment.rs` | 수정 | `verify_onchain_receipt`, in-flight guard, `authorizationState` 호출, `PAYMENT-RECEIPT` 헤더, `resolve_amount_usd` Result 화 |
+| `rust/crates/core/src/server/in_flight.rs` | **신규** | `InFlight`, `InFlightGuard`, `NonceKey` (envelope 파서) |
+| `rust/crates/core/src/server/mod.rs` | 수정 | `pub mod in_flight;` |
+| `rust/crates/core/src/lib.rs` | 수정 | `PaymentState::evm_in_flight()` 추가 |
+| `rust/crates/cli/src/commands/server/evm_x402_start.rs` | 수정 | `operator.rpc_url` 미설정 시 부팅 거절, `InFlight::new()` 주입 |
+| `rust/Cargo.toml` | 수정 | `parking_lot = "0.12"` workspace 의존성 (LRU 불필요) |
+| `rust/crates/core/Cargo.toml` | 수정 | `parking_lot` 을 `evm` feature 옵셔널로 추가 |
 
 ---
 
@@ -300,7 +364,9 @@ let amount_usd = match resolve_amount_usd(meter, &props, variant_hint.as_deref()
   → 명확한 에러
 - `verify_onchain_receipt_rejects_wrong_recipient` — to ≠ expected
 - `verify_onchain_receipt_rejects_reverted_tx` — receipt.status() = false
-- `nonces_seen_blocks_duplicate` — 같은 NonceKey 두 번째 insert → false
+- `in_flight_try_acquire_blocks_parallel` — 같은 NonceKey 가 guard 살아있는 동안 두 번째 `try_acquire` 호출 시 None
+- `in_flight_guard_releases_on_drop` — guard 해제 후 동일 key 재획득 가능
+- `authorization_state_call_decodes_bool` — alloy 인터페이스 응답을 bool 로 받기 (mock provider 또는 통합)
 - `resolve_amount_usd_propagates_metering_failure` — 가격 없음 → Err
 - `evm_x402_response_carries_payment_receipt_header` — `next.run` 응답에
   `PAYMENT-RECEIPT: 0x...` 부착 확인
@@ -308,7 +374,8 @@ let amount_usd = match resolve_amount_usd(meter, &props, variant_hint.as_deref()
 ### 통합 (`evm,network_tests`)
 
 - Sepolia facilitator 와 실제 결제 한 번 → tx_hash 회수 → 다시 같은 헤더로
-  재시도 → `duplicate_nonce` 거절 확인.
+  재시도 → mining 후이면 `authorization_state=true` 거절, mining 윈도우
+  내라면 `in_flight=busy` 거절.
 - `verify_onchain_receipt` 가 reorg 직후 일시적 `tx not yet mined` 를 어떻게
   처리하는지 — 옵션 1: 즉시 verification_failed, 옵션 2: 짧은 retry. Phase 11
   에서는 옵션 1 (단순). retry 는 후속 트랙.
@@ -321,14 +388,16 @@ let amount_usd = match resolve_amount_usd(meter, &props, variant_hint.as_deref()
 
 1. `protocol: x402` + EVM 네트워크 spec 에 `operator.rpc_url` 이 있어야 한다.
    없으면 부팅 거절. EVM 잔액 조회용으로 이미 채워둔 경우가 많음.
-2. 클러스터 배포 시 `NoncesSeen` 이 단일 노드 LRU 이므로, 로드 밸런서 sticky
-   session 이 없다면 같은 nonce 가 다른 노드에서 통과될 수 있다. 본 Phase 는
-   "best effort" 임을 운영 문서에 명시.
+2. `InFlight` lock 은 노드별이지만, on-chain `authorizationState` 가 권위적
+   ground truth 라 cluster 에서도 한 결제 = 한 forward 가 유지된다. 다른
+   노드의 parallel race 는 facilitator 호출 1회 낭비로 끝남 (받는 쪽
+   컨트랙트가 revert, Phase 11-1 receipt 검증이 거절). Redis SETNX 등 distributed
+   lock 은 비용/복잡도 대비 효익이 낮아 follow-up 트랙으로 분리.
 
 ---
 
 ## 비-목표
 
 - Solana 미들웨어 receipt 재검증 — 별도 트랙
-- Redis 기반 분산 nonce 캐시 — 별도 트랙
+- Redis 기반 distributed in-flight lock — 별도 트랙 (단일 노드에서는 불필요)
 - EVM facilitator 자체 운영 — 본 프로젝트 스코프 외
