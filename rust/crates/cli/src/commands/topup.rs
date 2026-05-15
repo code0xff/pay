@@ -164,22 +164,19 @@ fn run_evm_topup(network: &str, account_override: Option<&str>) -> pay_core::Res
             let acct = accounts
                 .named_account_for_network(network, name)
                 .ok_or_else(|| {
-                    pay_core::Error::Config(format!(
-                        "No account `{name}` configured on {network}"
-                    ))
+                    pay_core::Error::Config(format!("No account `{name}` configured on {network}"))
                 })?;
             let pubkey = acct.pubkey.clone().ok_or_else(|| {
-                pay_core::Error::Config(format!(
-                    "Account `{name}` on {network} has no pubkey"
-                ))
+                pay_core::Error::Config(format!("Account `{name}` on {network} has no pubkey"))
             })?;
             (name.to_string(), pubkey)
         }
         None => match accounts.account_for_network(network) {
             Some((name, account)) => {
-                let pubkey = account.pubkey.clone().ok_or_else(|| {
-                    pay_core::Error::Config("Account has no pubkey".to_string())
-                })?;
+                let pubkey = account
+                    .pubkey
+                    .clone()
+                    .ok_or_else(|| pay_core::Error::Config("Account has no pubkey".to_string()))?;
                 (name.to_string(), pubkey)
             }
             None => {
@@ -199,7 +196,10 @@ fn run_evm_topup(network: &str, account_override: Option<&str>) -> pay_core::Res
     );
     eprintln!("  {}", evm_funding_hint(network).dimmed());
     eprintln!();
-    eprintln!("  {}", "Polling for incoming USDC for 60 seconds (^C to abort)...".dimmed());
+    eprintln!(
+        "  {}",
+        "Polling for incoming USDC for 60 seconds (^C to abort)...".dimmed()
+    );
 
     // Read the baseline once so any inbound delta during the wait is
     // attributable to this topup attempt.

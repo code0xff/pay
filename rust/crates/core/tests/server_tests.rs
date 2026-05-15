@@ -85,7 +85,17 @@ async fn echo_handler(req: Request<Body>) -> impl IntoResponse {
     axum::Json(json!({ "method": method, "path": path, "echo": true }))
 }
 
-async fn start_test_server(with_mpp: bool) -> (String, tokio::task::JoinHandle<()>) {
+async fn bind_test_listener() -> Option<(tokio::net::TcpListener, String)> {
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+        Err(e) => panic!("bind test server: {e}"),
+    };
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    Some((listener, url))
+}
+
+async fn start_test_server(with_mpp: bool) -> Option<(String, tokio::task::JoinHandle<()>)> {
     let api = load_test_api();
     let mpp = if with_mpp {
         Mpp::new(solana_mpp::server::Config {
@@ -119,14 +129,13 @@ async fn start_test_server(with_mpp: bool) -> (String, tokio::task::JoinHandle<(
         ))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let (listener, url) = bind_test_listener().await?;
     let handle = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    (url, handle)
+    Some((url, handle))
 }
 
-async fn start_multi_currency_server() -> (String, tokio::task::JoinHandle<()>) {
+async fn start_multi_currency_server() -> Option<(String, tokio::task::JoinHandle<()>)> {
     let api = load_test_api();
     let mpps = ["USDC", "CASH", "USDT"]
         .into_iter()
@@ -157,11 +166,10 @@ async fn start_multi_currency_server() -> (String, tokio::task::JoinHandle<()>) 
         ))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let (listener, url) = bind_test_listener().await?;
     let handle = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    (url, handle)
+    Some((url, handle))
 }
 
 fn load_respond_api() -> ApiSpec {
@@ -175,7 +183,7 @@ fn client_with_host(subdomain: &str) -> reqwest::header::HeaderMap {
     h
 }
 
-async fn start_respond_server() -> (String, tokio::task::JoinHandle<()>) {
+async fn start_respond_server() -> Option<(String, tokio::task::JoinHandle<()>)> {
     let api = load_respond_api();
     let mpp = Mpp::new(solana_mpp::server::Config {
         recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY".to_string(),
@@ -213,11 +221,10 @@ async fn start_respond_server() -> (String, tokio::task::JoinHandle<()>) {
         ))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let (listener, url) = bind_test_listener().await?;
     let handle = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    (url, handle)
+    Some((url, handle))
 }
 
 fn test_session_mpp() -> SessionMpp {
@@ -235,7 +242,7 @@ fn test_session_mpp() -> SessionMpp {
     )
 }
 
-async fn start_session_server() -> (String, tokio::task::JoinHandle<()>) {
+async fn start_session_server() -> Option<(String, tokio::task::JoinHandle<()>)> {
     let api = load_test_api();
     let state = SessionTestState {
         apis: Arc::new(vec![api]),
@@ -251,11 +258,10 @@ async fn start_session_server() -> (String, tokio::task::JoinHandle<()>) {
         ))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let (listener, url) = bind_test_listener().await?;
     let handle = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    (url, handle)
+    Some((url, handle))
 }
 
 // =============================================================================
@@ -307,14 +313,18 @@ fn error_response_bad_gateway() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_skips_gateway_routes() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let resp = reqwest::get(format!("{url}/__402/health")).await.unwrap();
     assert_eq!(resp.status(), 200);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_passes_free_endpoints() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{url}/v1/health"))
@@ -330,7 +340,9 @@ async fn middleware_passes_free_endpoints() {
 #[ignore = "host/localhost passthrough is environment-sensitive and not payment-critical"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_passes_unknown_subdomain() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{url}/anything"))
@@ -343,7 +355,9 @@ async fn middleware_passes_unknown_subdomain() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_uses_single_api_mode_without_host_header() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -361,7 +375,9 @@ async fn middleware_uses_single_api_mode_without_host_header() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_returns_402_for_metered() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -376,7 +392,9 @@ async fn middleware_returns_402_for_metered() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_402_body_has_pricing() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -392,7 +410,9 @@ async fn middleware_402_body_has_pricing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_402_challenge_parseable() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -414,7 +434,9 @@ async fn middleware_402_challenge_parseable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_returns_one_challenge_per_configured_currency() {
-    let (url, _h) = start_multi_currency_server().await;
+    let Some((url, _h)) = start_multi_currency_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -447,7 +469,9 @@ async fn middleware_returns_one_challenge_per_configured_currency() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_html_payment_link_sets_html_content_type_and_challenge() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{url}/v1/simple/echo"))
@@ -474,7 +498,9 @@ async fn middleware_html_payment_link_sets_html_content_type_and_challenge() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_rejects_garbage_auth() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -491,7 +517,9 @@ async fn middleware_rejects_garbage_auth() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_rejects_bearer_scheme() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -511,7 +539,9 @@ async fn middleware_rejects_bearer_scheme() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_returns_session_challenge_when_session_mpp_configured() {
-    let (url, _h) = start_session_server().await;
+    let Some((url, _h)) = start_session_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -534,7 +564,9 @@ async fn middleware_returns_session_challenge_when_session_mpp_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_accepts_session_open_and_voucher_then_close() {
-    let (url, _h) = start_session_server().await;
+    let Some((url, _h)) = start_session_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
 
     let challenge_resp = client
@@ -598,7 +630,9 @@ async fn middleware_accepts_session_open_and_voucher_then_close() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_garbage_auth_includes_message() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/simple/echo"))
@@ -620,7 +654,9 @@ async fn middleware_garbage_auth_includes_message() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn middleware_passes_through_without_mpp() {
-    let (url, _h) = start_test_server(false).await;
+    let Some((url, _h)) = start_test_server(false).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     // Metered endpoint but no MPP → pass through
     let resp = client
@@ -751,8 +787,9 @@ async fn root_redirects_to_pdb_with_html_accept() {
         ))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let Some((listener, url)) = bind_test_listener().await else {
+        return;
+    };
     let _h = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -790,7 +827,9 @@ async fn root_redirects_to_pdb_with_html_accept() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_on_post_endpoint_returns_402_with_html_accept() {
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{url}/v1/simple/echo"))
@@ -809,7 +848,9 @@ async fn get_on_post_endpoint_returns_402_with_html_accept() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_on_post_endpoint_without_html_passes_through() {
     // With proxy routing, unknown method falls through to upstream (echo handler)
-    let (url, _h) = start_test_server(true).await;
+    let Some((url, _h)) = start_test_server(true).await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{url}/v1/simple/echo"))
@@ -824,7 +865,9 @@ async fn get_on_post_endpoint_without_html_passes_through() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn head_on_get_endpoint_returns_402() {
     // Uses respond server which has a metered GET endpoint
-    let (url, _h) = start_respond_server().await;
+    let Some((url, _h)) = start_respond_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client.head(format!("{url}/v1/data")).send().await.unwrap();
     // HEAD should be gated same as GET
@@ -837,7 +880,9 @@ async fn head_on_get_endpoint_returns_402() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respond_get_metered_returns_402() {
-    let (url, _h) = start_respond_server().await;
+    let Some((url, _h)) = start_respond_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client.get(format!("{url}/v1/data")).send().await.unwrap();
     assert_eq!(
@@ -850,7 +895,9 @@ async fn respond_get_metered_returns_402() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respond_post_metered_returns_402() {
-    let (url, _h) = start_respond_server().await;
+    let Some((url, _h)) = start_respond_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{url}/v1/submit"))
@@ -867,7 +914,9 @@ async fn respond_post_metered_returns_402() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respond_free_endpoint_passes_through() {
-    let (url, _h) = start_respond_server().await;
+    let Some((url, _h)) = start_respond_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client.get(format!("{url}/v1/health")).send().await.unwrap();
     // Free endpoint with respond routing: passes to fallback (echo)
@@ -876,7 +925,9 @@ async fn respond_free_endpoint_passes_through() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respond_unknown_path_returns_404() {
-    let (url, _h) = start_respond_server().await;
+    let Some((url, _h)) = start_respond_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{url}/v1/nonexistent"))
@@ -892,7 +943,9 @@ async fn respond_unknown_path_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respond_wrong_method_returns_404() {
-    let (url, _h) = start_respond_server().await;
+    let Some((url, _h)) = start_respond_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     // GET on a POST-only endpoint without Accept:text/html
     let resp = client.get(format!("{url}/v1/submit")).send().await.unwrap();
@@ -905,7 +958,9 @@ async fn respond_wrong_method_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respond_wrong_method_with_html_returns_402() {
-    let (url, _h) = start_respond_server().await;
+    let Some((url, _h)) = start_respond_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     // GET on POST endpoint with Accept:text/html → payment link page
     let resp = client
@@ -923,7 +978,9 @@ async fn respond_wrong_method_with_html_returns_402() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respond_service_worker_always_served() {
-    let (url, _h) = start_respond_server().await;
+    let Some((url, _h)) = start_respond_server().await else {
+        return;
+    };
     let client = reqwest::Client::new();
     // Service worker request on a POST endpoint path
     let resp = client

@@ -486,19 +486,15 @@ mod evm_balances {
     /// - Native ETH is emitted as a `TokenBalance { symbol: Some("ETH") }`.
     /// - Stablecoin balances are emitted as `TokenBalance` with `symbol`
     ///   set to the human-readable ticker, `mint` to the contract address.
-    pub async fn get_evm_balances(
-        network: &str,
-        address: &str,
-    ) -> crate::Result<AccountBalances> {
+    pub async fn get_evm_balances(network: &str, address: &str) -> crate::Result<AccountBalances> {
         let rpc_url = evm_rpc_url(network);
         let parsed_url: reqwest::Url = rpc_url
             .parse()
             .map_err(|e| crate::Error::Config(format!("Invalid EVM RPC URL `{rpc_url}`: {e}")))?;
         let provider = ProviderBuilder::new().connect_http(parsed_url);
 
-        let addr = Address::from_str(address).map_err(|e| {
-            crate::Error::Config(format!("Invalid EVM address `{address}`: {e}"))
-        })?;
+        let addr = Address::from_str(address)
+            .map_err(|e| crate::Error::Config(format!("Invalid EVM address `{address}`: {e}")))?;
 
         let mut tokens = Vec::new();
 
@@ -603,9 +599,15 @@ mod evm_balances {
         #[test]
         fn evm_rpc_url_normalises_hyphenated_slugs() {
             unsafe {
-                std::env::set_var("PAY_BASE_SEPOLIA_RPC_URL", "https://example.test/base-sepolia")
+                std::env::set_var(
+                    "PAY_BASE_SEPOLIA_RPC_URL",
+                    "https://example.test/base-sepolia",
+                )
             };
-            assert_eq!(evm_rpc_url("base-sepolia"), "https://example.test/base-sepolia");
+            assert_eq!(
+                evm_rpc_url("base-sepolia"),
+                "https://example.test/base-sepolia"
+            );
             unsafe { std::env::remove_var("PAY_BASE_SEPOLIA_RPC_URL") };
         }
 

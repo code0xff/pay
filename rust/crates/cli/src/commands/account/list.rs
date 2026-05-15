@@ -89,10 +89,7 @@ pub fn print_account_list(
                     "devnet" => "https://api.devnet.solana.com".to_string(),
                     _ => rpc_url.clone(),
                 };
-                by_rpc
-                    .entry(network_rpc)
-                    .or_default()
-                    .push(pubkey.clone());
+                by_rpc.entry(network_rpc).or_default().push(pubkey.clone());
             }
         }
         for pubkeys in by_rpc.values_mut() {
@@ -114,8 +111,7 @@ pub fn print_account_list(
             #[cfg(feature = "evm")]
             for (network, address) in evm_lookups.clone() {
                 set.spawn(async move {
-                    let result =
-                        pay_core::balance::get_evm_balances(&network, &address).await;
+                    let result = pay_core::balance::get_evm_balances(&network, &address).await;
                     BalanceJobResult::Evm { address, result }
                 });
             }

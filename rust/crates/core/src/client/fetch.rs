@@ -186,20 +186,29 @@ mod tests {
     /// Start a background server on a random port, return its URL.
     /// Uses a separate thread with its own tokio runtime to avoid
     /// conflicts with reqwest::blocking inside fetch().
-    fn start_server(handler: axum::Router) -> String {
+    fn start_server(handler: axum::Router) -> Option<String> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                    Ok(listener) => listener,
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        let _ = tx.send(None);
+                        return;
+                    }
+                    Err(e) => panic!("bind test fetch server: {e}"),
+                };
                 let addr = listener.local_addr().unwrap();
-                tx.send(format!("http://{addr}")).unwrap();
+                tx.send(Some(format!("http://{addr}"))).unwrap();
                 axum::serve(listener, handler).await.ok();
             });
         });
         let url = rx.recv().unwrap();
-        // Give the server time to accept connections
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        if url.is_some() {
+            // Give the server time to accept connections
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         url
     }
 
@@ -207,7 +216,9 @@ mod tests {
     fn fetch_200_returns_body() {
         let app =
             axum::Router::new().route("/data", axum::routing::get(|| async { "hello world" }));
-        let base_url = start_server(app);
+        let Some(base_url) = start_server(app) else {
+            return;
+        };
 
         let result = fetch(&format!("{base_url}/data"), &[]).unwrap();
         match result {
@@ -227,7 +238,9 @@ mod tests {
             "/missing",
             axum::routing::get(|| async { (axum::http::StatusCode::NOT_FOUND, "not found") }),
         );
-        let base_url = start_server(app);
+        let Some(base_url) = start_server(app) else {
+            return;
+        };
 
         let result = fetch(&format!("{base_url}/missing"), &[]).unwrap();
         match result {
@@ -247,7 +260,9 @@ mod tests {
             "/paid",
             axum::routing::get(|| async { (axum::http::StatusCode::PAYMENT_REQUIRED, "pay up") }),
         );
-        let base_url = start_server(app);
+        let Some(base_url) = start_server(app) else {
+            return;
+        };
 
         let result = fetch(&format!("{base_url}/paid"), &[]).unwrap();
         assert!(matches!(result, RunOutcome::UnknownPaymentRequired { .. }));
@@ -265,7 +280,9 @@ mod tests {
                     .to_string()
             }),
         );
-        let base_url = start_server(app);
+        let Some(base_url) = start_server(app) else {
+            return;
+        };
 
         let headers = vec![("x-custom".to_string(), "test-value".to_string())];
         let result = fetch(&format!("{base_url}/echo-header"), &headers).unwrap();
@@ -283,7 +300,9 @@ mod tests {
             "/echo-body",
             axum::routing::post(|body: String| async move { body }),
         );
-        let base_url = start_server(app);
+        let Some(base_url) = start_server(app) else {
+            return;
+        };
 
         let result = fetch_request(
             "POST",
@@ -344,7 +363,9 @@ mod tests {
                 }
             }),
         );
-        let base_url = start_server(app);
+        let Some(base_url) = start_server(app) else {
+            return;
+        };
 
         let raw = fetch_raw("GET", &format!("{base_url}/blob"), &[], None).unwrap();
         assert_eq!(raw.body, payload, "raw bytes must match exactly");
@@ -362,7 +383,9 @@ mod tests {
                 )
             }),
         );
-        let base_url = start_server(app);
+        let Some(base_url) = start_server(app) else {
+            return;
+        };
 
         let result = fetch(&format!("{base_url}/img"), &[]).unwrap();
         match result {

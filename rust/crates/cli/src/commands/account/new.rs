@@ -589,12 +589,7 @@ fn save_evm_account(
 }
 
 #[cfg(feature = "evm")]
-fn print_evm_next_steps(
-    name: &str,
-    network: &str,
-    address: &str,
-    backend_name: &str,
-) {
+fn print_evm_next_steps(name: &str, network: &str, address: &str, backend_name: &str) {
     eprintln!();
     eprintln!(
         "  {} EVM account `{}` secured in {}",
@@ -602,7 +597,12 @@ fn print_evm_next_steps(
         name.green(),
         backend_name.green()
     );
-    eprintln!("  {} {} on {}", "address".dimmed(), address, network.green());
+    eprintln!(
+        "  {} {} on {}",
+        "address".dimmed(),
+        address,
+        network.green()
+    );
     eprintln!();
     let topup_cmd = if name == pay_core::accounts::DEFAULT_ACCOUNT_NAME {
         format!("pay topup --network {network}")

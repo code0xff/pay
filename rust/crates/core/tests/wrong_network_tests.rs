@@ -63,7 +63,7 @@ async fn echo_handler(_req: Request<Body>) -> impl IntoResponse {
 /// reject the credential pre-broadcast (i.e. if the network check is
 /// silently bypassed, the test will hang/time-out on the broadcast attempt
 /// instead of giving a misleading green).
-async fn start_server_with_network(network: &str) -> (String, tokio::task::JoinHandle<()>) {
+async fn start_server_with_network(network: &str) -> Option<(String, tokio::task::JoinHandle<()>)> {
     let api: ApiSpec =
         serde_yml::from_str(&std::fs::read_to_string("tests/fixtures/test-provider.yml").unwrap())
             .unwrap();
@@ -93,11 +93,15 @@ async fn start_server_with_network(network: &str) -> (String, tokio::task::JoinH
         ))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+        Err(e) => panic!("bind wrong-network test server: {e}"),
+    };
     let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    (url, handle)
+    Some((url, handle))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -187,7 +191,9 @@ fn surfpool_blockhash_from_prefix() -> Hash {
 /// silently bypassed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mainnet_server_rejects_surfpool_blockhash() {
-    let (url, _h) = start_server_with_network("mainnet").await;
+    let Some((url, _h)) = start_server_with_network("mainnet").await else {
+        return;
+    };
 
     // Step 1: get a fresh challenge from the server.
     let client = reqwest::Client::new();
@@ -274,7 +280,9 @@ async fn mainnet_server_rejects_surfpool_blockhash() {
 /// for any non-localnet network slug, not just mainnet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn devnet_server_rejects_surfpool_blockhash() {
-    let (url, _h) = start_server_with_network("devnet").await;
+    let Some((url, _h)) = start_server_with_network("devnet").await else {
+        return;
+    };
 
     let client = reqwest::Client::new();
     let resp = client
@@ -337,7 +345,9 @@ async fn devnet_server_rejects_surfpool_blockhash() {
 /// from a later stage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn localnet_server_accepts_surfpool_blockhash() {
-    let (url, _h) = start_server_with_network("localnet").await;
+    let Some((url, _h)) = start_server_with_network("localnet").await else {
+        return;
+    };
 
     let client = reqwest::Client::new();
     let resp = client

@@ -336,6 +336,9 @@ impl AccountsFile {
 
 /// Result of looking up an account for a network.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// This is a public API. Boxing `Account` would save enum stack space but
+// force downstream callers to handle an extra indirection.
+#[allow(clippy::large_enum_variant)]
 pub enum AccountChoice {
     /// Network has an account configured.
     Resolved { name: String, account: Account },

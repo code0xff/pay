@@ -45,7 +45,10 @@ async fn sepolia_burn_address_returns_zero_or_minimal_balance() {
             "tokens vec entries must be positive: {token:?}"
         );
         assert!(
-            matches!(token.symbol.as_deref(), Some("ETH") | Some("USDC") | Some("USDT")),
+            matches!(
+                token.symbol.as_deref(),
+                Some("ETH") | Some("USDC") | Some("USDT")
+            ),
             "unexpected symbol from Sepolia: {token:?}"
         );
     }

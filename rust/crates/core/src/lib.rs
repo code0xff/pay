@@ -41,9 +41,9 @@ use pay_types::metering::ApiSpec;
 #[cfg(feature = "server")]
 pub use solana_mpp;
 #[cfg(feature = "server")]
-pub use solana_x402;
-#[cfg(feature = "server")]
 use solana_mpp::server::Mpp;
+#[cfg(feature = "server")]
+pub use solana_x402;
 #[cfg(feature = "server")]
 use solana_x402::server::X402;
 

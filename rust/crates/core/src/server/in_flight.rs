@@ -143,7 +143,10 @@ impl Drop for InFlightGuard {
 fn parse_address(s: &str) -> Result<[u8; 20], String> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     if stripped.len() != 40 {
-        return Err(format!("expected 20-byte hex (40 chars), got {}", stripped.len()));
+        return Err(format!(
+            "expected 20-byte hex (40 chars), got {}",
+            stripped.len()
+        ));
     }
     let bytes = hex::decode(stripped).map_err(|e| e.to_string())?;
     bytes
@@ -154,7 +157,10 @@ fn parse_address(s: &str) -> Result<[u8; 20], String> {
 fn parse_b256(s: &str) -> Result<[u8; 32], String> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     if stripped.len() != 64 {
-        return Err(format!("expected 32-byte hex (64 chars), got {}", stripped.len()));
+        return Err(format!(
+            "expected 32-byte hex (64 chars), got {}",
+            stripped.len()
+        ));
     }
     let bytes = hex::decode(stripped).map_err(|e| e.to_string())?;
     bytes
@@ -266,8 +272,14 @@ mod tests {
     #[test]
     fn different_chains_dont_collide() {
         let in_flight = InFlight::new();
-        let k1 = NonceKey { chain_id: 1, ..key() };
-        let k2 = NonceKey { chain_id: 8453, ..key() };
+        let k1 = NonceKey {
+            chain_id: 1,
+            ..key()
+        };
+        let k2 = NonceKey {
+            chain_id: 8453,
+            ..key()
+        };
         let _g1 = in_flight.try_acquire(k1).expect("k1");
         let _g2 = in_flight.try_acquire(k2).expect("k2");
         assert_eq!(in_flight.len(), 2);

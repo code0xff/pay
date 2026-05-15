@@ -417,7 +417,11 @@ mod tests {
     use crate::accounts::{Account, AccountsFile, Keystore, MemoryAccountsStore};
     use serial_test::serial;
     use solana_mpp::{Base64UrlJson, SessionMode, SessionSplit, parse_authorization};
-    use surfpool_sdk::{Keypair, Signer};
+
+    struct TestKeypair {
+        bytes: [u8; 64],
+        pubkey: String,
+    }
 
     fn test_request() -> SessionRequest {
         SessionRequest {
@@ -462,7 +466,21 @@ mod tests {
         serde_json::from_value(credential.payload).expect("decode session action")
     }
 
-    fn memory_store_for_keypair(keypair: &Keypair) -> MemoryAccountsStore {
+    fn test_keypair() -> TestKeypair {
+        use ed25519_dalek::SigningKey;
+
+        let sk = SigningKey::generate(&mut rand::thread_rng());
+        let vk = sk.verifying_key();
+        let mut bytes = [0u8; 64];
+        bytes[..32].copy_from_slice(sk.as_bytes());
+        bytes[32..].copy_from_slice(vk.as_bytes());
+        TestKeypair {
+            bytes,
+            pubkey: bs58::encode(vk.as_bytes()).into_string(),
+        }
+    }
+
+    fn memory_store_for_keypair(keypair: &TestKeypair) -> MemoryAccountsStore {
         let mut file = AccountsFile::default();
         file.upsert(
             "localnet",
@@ -471,11 +489,11 @@ mod tests {
                 keystore: Keystore::Ephemeral,
                 active: false,
                 auth_required: Some(false),
-                pubkey: Some(keypair.pubkey().to_string()),
+                pubkey: Some(keypair.pubkey.clone()),
                 vault: None,
                 account: None,
                 path: None,
-                secret_key_b58: Some(bs58::encode(keypair.to_bytes()).into_string()),
+                secret_key_b58: Some(bs58::encode(keypair.bytes).into_string()),
                 chain_family: None,
                 secret_key_hex: None,
                 created_at: Some("2026-04-19T00:00:00Z".to_string()),
@@ -627,7 +645,7 @@ mod tests {
     #[test]
     #[serial]
     fn open_pull_session_header_rejects_invalid_operator() {
-        let user = Keypair::new();
+        let user = test_keypair();
         let store = memory_store_for_keypair(&user);
         let mut request = test_request();
         request.operator = "not-a-pubkey".to_string();
@@ -653,7 +671,7 @@ mod tests {
     #[test]
     #[serial]
     fn open_pull_session_header_rejects_invalid_mint() {
-        let user = Keypair::new();
+        let user = test_keypair();
         let store = memory_store_for_keypair(&user);
         let mut request = test_request();
         request.currency = "not-a-mint".to_string();
@@ -679,7 +697,7 @@ mod tests {
     #[test]
     #[serial]
     fn open_pull_session_header_reports_rpc_failures() {
-        let user = Keypair::new();
+        let user = test_keypair();
         let store = memory_store_for_keypair(&user);
         let original = std::env::var("PAY_RPC_URL").ok();
         // SAFETY: this test is `serial`, so no concurrent env access occurs.

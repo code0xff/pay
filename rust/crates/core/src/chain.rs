@@ -33,10 +33,10 @@ impl ChainFamily {
             "holesky" => ChainFamily::Evm { chain_id: 17000 },
             "base-sepolia" => ChainFamily::Evm { chain_id: 84532 },
             other => {
-                if let Some(id_str) = other.strip_prefix("eip155:") {
-                    if let Ok(id) = id_str.parse::<u64>() {
-                        return ChainFamily::Evm { chain_id: id };
-                    }
+                if let Some(id_str) = other.strip_prefix("eip155:")
+                    && let Ok(id) = id_str.parse::<u64>()
+                {
+                    return ChainFamily::Evm { chain_id: id };
                 }
                 ChainFamily::Solana
             }
@@ -180,9 +180,7 @@ mod tests {
         );
         assert_eq!(
             ChainFamily::from_network_slug("sepolia"),
-            ChainFamily::Evm {
-                chain_id: 11155111
-            }
+            ChainFamily::Evm { chain_id: 11155111 }
         );
     }
 
@@ -208,7 +206,10 @@ mod tests {
     fn evm_signer_random_has_valid_address() {
         let signer = EvmChainSigner::random(1);
         let addr = signer.address();
-        assert!(addr.starts_with("0x"), "EVM address must start with 0x: {addr}");
+        assert!(
+            addr.starts_with("0x"),
+            "EVM address must start with 0x: {addr}"
+        );
         assert_eq!(addr.len(), 42, "EVM address must be 42 chars: {addr}");
     }
 

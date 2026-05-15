@@ -216,9 +216,8 @@ impl ImportCommand {
         // EvmChainSigner::from_hex tolerates the leading 0x and validates
         // both length and curve order. Reuse it as the canonical parser so
         // CLI input drift stays in lockstep with the runtime signer.
-        let signer = EvmChainSigner::from_hex(raw_hex, chain_id).map_err(|e| {
-            pay_core::Error::Config(format!("Invalid secp256k1 private key: {e}"))
-        })?;
+        let signer = EvmChainSigner::from_hex(raw_hex, chain_id)
+            .map_err(|e| pay_core::Error::Config(format!("Invalid secp256k1 private key: {e}")))?;
         let address = signer.address();
         let priv_bytes = signer.to_private_key_bytes();
 
@@ -226,13 +225,16 @@ impl ImportCommand {
         // bail out if it doesn't match their expectation.
         eprintln!();
         eprintln!("  {} {}", "Address:".dimmed(), address);
-        eprintln!("  {} {} (chain id {chain_id})", "Network:".dimmed(), network.green());
+        eprintln!(
+            "  {} {} (chain id {chain_id})",
+            "Network:".dimmed(),
+            network.green()
+        );
         eprintln!();
 
         let theme = ColorfulTheme::default();
         let mut accounts = pay_core::accounts::AccountsFile::load()?;
-        if let Some((existing_network, existing_name)) =
-            find_account_by_pubkey(&accounts, &address)
+        if let Some((existing_network, existing_name)) = find_account_by_pubkey(&accounts, &address)
         {
             let proceed = Confirm::with_theme(&theme)
                 .with_prompt(format!(

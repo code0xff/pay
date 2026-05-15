@@ -4,7 +4,7 @@
 //! (payment middleware) against a real Solana runtime — no external
 //! process needed.
 //!
-//! Run: `cargo test -p pay-core --features server --test surfpool_tests`
+//! Run: `cargo test -p pay-core --features surfpool_tests --test surfpool_tests`
 
 #![cfg(feature = "server")]
 

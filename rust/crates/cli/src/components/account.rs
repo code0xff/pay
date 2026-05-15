@@ -37,12 +37,7 @@ pub fn print_balances(balances: &AccountBalances, indent: &str) -> bool {
 /// Fallback rendered when balance lookup failed (RPC down, pay-api
 /// unreachable, etc). Prints "api offline" in yellow followed by a clickable
 /// block-explorer link routed by network family.
-pub fn print_balance_unavailable(
-    indent: &str,
-    pubkey: Option<&str>,
-    network: &str,
-    rpc_url: &str,
-) {
+pub fn print_balance_unavailable(indent: &str, pubkey: Option<&str>, network: &str, rpc_url: &str) {
     eprintln!(
         "{indent}{}  {}",
         "api offline".yellow(),
@@ -135,7 +130,11 @@ mod tests {
 
     #[test]
     fn explorer_link_for_solana_mainnet_omits_cluster_param() {
-        let link = explorer_link(Some("ABC"), "mainnet", "https://api.mainnet-beta.solana.com");
+        let link = explorer_link(
+            Some("ABC"),
+            "mainnet",
+            "https://api.mainnet-beta.solana.com",
+        );
         assert!(link.contains("explorer.solana.com/address/ABC/tokens"));
         assert!(!link.contains("cluster=custom"));
     }

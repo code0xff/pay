@@ -171,7 +171,11 @@ pub fn run(bind: &str, api: ApiSpec) -> pay_core::Result<()> {
             .local_addr()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| bind.clone());
-        eprintln!("{} EVM x402 gateway listening on http://{}", "ready".green(), local);
+        eprintln!(
+            "{} EVM x402 gateway listening on http://{}",
+            "ready".green(),
+            local
+        );
 
         axum::serve(listener, app)
             .await
@@ -192,11 +196,7 @@ fn print_banner(
         eprintln!("{banner}");
         eprintln!();
     }
-    eprintln!(
-        "{}\t{} (EVM x402)",
-        "network".dimmed(),
-        network.green()
-    );
+    eprintln!("{}\t{} (EVM x402)", "network".dimmed(), network.green());
     eprintln!("{}\t{}", "operator".dimmed(), recipient);
     eprintln!("{}\t{}", "facilitator".dimmed(), facilitator_url);
     eprintln!("{}\t{}", "rpc".dimmed(), rpc_url);

@@ -68,9 +68,7 @@ pub async fn x402_payment_middleware<S: PaymentState>(
     let metering_config = endpoint.and_then(|ep| ep.metering.as_ref());
 
     if metering_config.is_none() {
-        if api.routing.is_respond()
-            && metering::find_endpoint_by_path(api, &path).is_some()
-        {
+        if api.routing.is_respond() && metering::find_endpoint_by_path(api, &path).is_some() {
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header("content-type", "application/json")
@@ -112,18 +110,7 @@ pub async fn x402_payment_middleware<S: PaymentState>(
 
     match payment_header {
         None => challenge_response(&x402s, &method, &path, subdomain, &amount, endpoint),
-        Some(header) => {
-            handle_payment(
-                x402s,
-                header,
-                amount,
-                subdomain,
-                &path,
-                req,
-                next,
-            )
-            .await
-        }
+        Some(header) => handle_payment(x402s, header, amount, subdomain, &path, req, next).await,
     }
 }
 
@@ -372,8 +359,8 @@ mod tests {
             sku_tiers: vec![],
             splits: vec![],
         };
-        let amount = resolve_amount(&meter, &RequestProperties::default(), None, 6)
-            .expect("default amount");
+        let amount =
+            resolve_amount(&meter, &RequestProperties::default(), None, 6).expect("default amount");
         // 6-decimal fixed precision: 0.01 → "0.010000".
         assert_eq!(amount, "0.010000");
     }

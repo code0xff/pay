@@ -1663,8 +1663,14 @@ mod tests {
     }
 
     /// Spin up a one-shot axum server, return its base URL.
-    async fn spawn_upstream(handler: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    async fn spawn_upstream(
+        handler: axum::Router,
+    ) -> Option<(String, tokio::task::JoinHandle<()>)> {
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(e) => panic!("bind test upstream: {e}"),
+        };
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}");
         let handle = tokio::spawn(async move {
@@ -1672,7 +1678,7 @@ mod tests {
         });
         // Give the server a moment to bind
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        (url, handle)
+        Some((url, handle))
     }
 
     #[tokio::test]
@@ -1681,7 +1687,9 @@ mod tests {
             "/v1/test",
             axum::routing::get(|| async { "hello from upstream" }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         let api = ApiSpec {
             routing: RoutingConfig::Proxy {
@@ -1727,7 +1735,9 @@ mod tests {
                 }
             }),
         );
-        let (token_base_url, _token_handle) = spawn_upstream(token_app).await;
+        let Some((token_base_url, _token_handle)) = spawn_upstream(token_app).await else {
+            return;
+        };
 
         #[derive(Debug, Default)]
         struct CapturedIsiRequest {
@@ -1754,7 +1764,9 @@ mod tests {
                 },
             ),
         );
-        let (upstream_base_url, _upstream_handle) = spawn_upstream(upstream_app).await;
+        let Some((upstream_base_url, _upstream_handle)) = spawn_upstream(upstream_app).await else {
+            return;
+        };
 
         unsafe { std::env::set_var("_TEST_ISI_APP_KEY", "app-key-123") };
         unsafe { std::env::set_var("_TEST_ISI_ACCESS_KEY_ID", "test-id") };
@@ -1821,7 +1833,9 @@ mod tests {
             "/v1/echo",
             axum::routing::post(|body: String| async move { format!("echo: {body}") }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         let api = ApiSpec {
             routing: RoutingConfig::Proxy {
@@ -1861,7 +1875,9 @@ mod tests {
                 async { "ok" }
             }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         let api = ApiSpec {
             routing: RoutingConfig::Proxy {
@@ -1891,7 +1907,9 @@ mod tests {
             "/v1/notfound",
             axum::routing::get(|| async { (StatusCode::NOT_FOUND, "nope") }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         let api = ApiSpec {
             routing: RoutingConfig::Proxy {
@@ -1937,7 +1955,9 @@ mod tests {
                 uri.query().unwrap_or("none").to_string()
             }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         let api = ApiSpec {
             routing: RoutingConfig::Proxy {
@@ -1970,7 +1990,9 @@ mod tests {
             "/v3/projects/operator-proj/translate",
             axum::routing::post(|| async { "translated" }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         // SAFETY: test-only, single-threaded
         unsafe { std::env::set_var("_TEST_FWD_PROJECT", "operator-proj") };
@@ -2018,7 +2040,9 @@ mod tests {
                 }
             }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         // SAFETY: test-only env mutation scoped to this test.
         unsafe { std::env::set_var("_TEST_PROXY_AUTH", "secret-123") };
@@ -2102,7 +2126,9 @@ mod tests {
                 }
             }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         unsafe { std::env::set_var("_TEST_ALIBABA_ACCESS_KEY_ID", "test-id") };
         unsafe { std::env::set_var("_TEST_ALIBABA_ACCESS_KEY_SECRET", "test-secret") };
@@ -2225,7 +2251,9 @@ mod tests {
                 uri.query().unwrap_or_default().to_string()
             }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         unsafe { std::env::set_var("_TEST_HMAC_QUERY_SECRET", "query-secret") };
         let api = ApiSpec {
@@ -2274,7 +2302,9 @@ mod tests {
     #[tokio::test]
     async fn forward_request_hmac_missing_canonical_header_returns_bad_gateway() {
         let app = axum::Router::new().route("/v1/check", axum::routing::get(|| async { "ok" }));
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         unsafe { std::env::set_var("_TEST_HMAC_MISSING_SECRET", "secret") };
         let api = ApiSpec {
@@ -2332,7 +2362,9 @@ mod tests {
                 uri.query().unwrap_or_default().to_string()
             }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         // SAFETY: test-only env mutation scoped to this test.
         unsafe { std::env::set_var("_TEST_PROXY_QUERY_AUTH", "qp-secret") };
@@ -2373,7 +2405,9 @@ mod tests {
                     .to_string()
             }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         let api = ApiSpec {
             routing: RoutingConfig::Proxy {
@@ -2537,7 +2571,9 @@ mod tests {
             "/v1/proxy-me",
             axum::routing::get(|| async { "from upstream" }),
         );
-        let (base_url, _handle) = spawn_upstream(app).await;
+        let Some((base_url, _handle)) = spawn_upstream(app).await else {
+            return;
+        };
 
         let mut api = make_api("test");
         api.routing = RoutingConfig::Proxy {

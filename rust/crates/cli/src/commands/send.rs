@@ -188,15 +188,14 @@ fn run_evm_send(
         );
     }
 
-    let result = pay_core::client::send_evm::send_erc20(
-        pay_core::client::send_evm::EvmSendRequest {
+    let result =
+        pay_core::client::send_evm::send_erc20(pay_core::client::send_evm::EvmSendRequest {
             amount,
             recipient,
             stablecoin_symbol: &symbol,
             network,
             account_override,
-        },
-    )?;
+        })?;
 
     let amount_sent = pay_core::send::format_token_amount(
         result.amount_raw.min(u64::MAX as u128) as u64,
@@ -864,27 +863,36 @@ mod tests {
         assert_eq!(send_success_title(&result), "Sent 1 USDC to to");
     }
 
+    #[cfg(not(feature = "evm"))]
     #[test]
-    fn reject_evm_network_blocks_evm_slugs_with_clear_message() {
+    fn send_reports_missing_evm_feature_for_evm_slugs() {
         for slug in ["ethereum", "base", "sepolia", "base-sepolia", "holesky"] {
-            let err = reject_evm_network("send", slug).unwrap_err();
+            let err = SendCommand {
+                amount: "1".to_string(),
+                recipient: "0x0000000000000000000000000000000000000001".to_string(),
+                currency: Some("USDC".to_string()),
+                memo: None,
+                memo_hex: None,
+                fee_within: false,
+            }
+            .run(Some(slug), None, false)
+            .unwrap_err();
             let msg = err.to_string();
             assert!(
-                msg.contains("not yet supported on EVM networks"),
-                "missing guard message for {slug}: {msg}"
+                msg.contains("requires the `evm` Cargo feature"),
+                "missing feature-gate message for {slug}: {msg}"
             );
             assert!(
                 msg.contains(slug),
-                "guard message should echo the slug `{slug}`: {msg}"
+                "feature-gate message should echo the slug `{slug}`: {msg}"
             );
         }
     }
 
     #[test]
-    fn reject_evm_network_allows_solana_slugs() {
+    fn network_family_keeps_solana_slugs_on_solana_path() {
         for slug in ["mainnet", "devnet", "localnet"] {
-            assert!(reject_evm_network("send", slug).is_ok());
-            assert!(reject_evm_network("topup", slug).is_ok());
+            assert!(!pay_core::accounts::is_evm_network_family(slug));
         }
     }
 

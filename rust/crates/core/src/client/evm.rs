@@ -9,8 +9,8 @@
 use solana_x402::exact::PaymentRequirements;
 use tracing::info;
 use x402_chain_eip155::V2Eip155ExactClient;
-use x402_types::proto::{self, OriginalJson};
 use x402_types::proto::v2;
+use x402_types::proto::{self, OriginalJson};
 use x402_types::scheme::client::X402SchemeClient;
 
 use crate::accounts::AccountsStore;
@@ -78,12 +78,15 @@ fn pick_best_candidate<C>(
     candidates: impl IntoIterator<Item = C>,
     network: &str,
 ) -> std::result::Result<C, Box<dyn std::error::Error + Send + Sync>> {
-    candidates.into_iter().next().ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-        Box::from(format!(
-            "x402-chain-eip155 produced no candidate for network `{network}` \
+    candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+            Box::from(format!(
+                "x402-chain-eip155 produced no candidate for network `{network}` \
              (requirements may have an unsupported `extra` shape)"
-        ))
-    })
+            ))
+        })
 }
 
 /// Drive `V2Eip155ExactClient` with a single-entry `PaymentRequired::V2`
@@ -194,7 +197,8 @@ mod tests {
             siwx: None,
         };
 
-        let err = build_evm_payment(&challenge, &requirements, "mainnet", &store, None).unwrap_err();
+        let err =
+            build_evm_payment(&challenge, &requirements, "mainnet", &store, None).unwrap_err();
         assert!(
             err.to_string().contains("not an EVM network"),
             "unexpected error: {err}"

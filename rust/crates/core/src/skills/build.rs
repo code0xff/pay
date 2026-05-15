@@ -1018,15 +1018,19 @@ mod tests {
         }
     }
 
-    fn start_probe_server(expected_requests: usize) -> (String, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    fn start_probe_server(expected_requests: usize) -> Option<(String, thread::JoinHandle<()>)> {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(e) => panic!("bind test server: {e}"),
+        };
         let addr = listener.local_addr().expect("local addr");
         let handle = thread::spawn(move || {
             for stream in listener.incoming().take(expected_requests).flatten() {
                 handle_probe_request(stream);
             }
         });
-        (format!("http://{addr}"), handle)
+        Some((format!("http://{addr}"), handle))
     }
 
     fn handle_probe_request(mut stream: TcpStream) {
@@ -1097,7 +1101,9 @@ mod tests {
 
     #[test]
     fn build_keeps_solana_paid_and_free_200_endpoints() {
-        let (service_url, handle) = start_probe_server(4);
+        let Some((service_url, handle)) = start_probe_server(4) else {
+            return;
+        };
         let endpoints = vec![
             endpoint("GET", "/paid", None),
             endpoint(

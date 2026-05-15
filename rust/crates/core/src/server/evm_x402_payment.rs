@@ -123,9 +123,7 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
             ));
         }
         None => {
-            return internal_error(
-                "EVM x402 middleware mounted but `operator.network` is unset",
-            );
+            return internal_error("EVM x402 middleware mounted but `operator.network` is unset");
         }
     };
     let recipient = match operator.recipient.as_deref() {
@@ -176,9 +174,7 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
     let metering_config = endpoint.and_then(|ep| ep.metering.as_ref());
 
     if metering_config.is_none() {
-        if api.routing.is_respond()
-            && metering::find_endpoint_by_path(api, &path).is_some()
-        {
+        if api.routing.is_respond() && metering::find_endpoint_by_path(api, &path).is_some() {
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header("content-type", "application/json")
@@ -209,9 +205,21 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
     let description = endpoint.and_then(|ep| ep.description.as_deref());
     let mut accepts: Vec<serde_json::Value> = Vec::with_capacity(currency_symbols.len());
     for sym in &currency_symbols {
-        match build_evm_requirements(rpc_url, network_slug, recipient, sym, amount_usd, &uri, description).await {
+        match build_evm_requirements(
+            rpc_url,
+            network_slug,
+            recipient,
+            sym,
+            amount_usd,
+            &uri,
+            description,
+        )
+        .await
+        {
             Ok(req) => accepts.push(req),
-            Err(e) => tracing::warn!(symbol = %sym, error = %e, "Skipping currency symbol in accepts"),
+            Err(e) => {
+                tracing::warn!(symbol = %sym, error = %e, "Skipping currency symbol in accepts")
+            }
         }
     }
     if accepts.is_empty() {
@@ -372,13 +380,7 @@ async fn handle_payment(
     // contract; if it's already `true`, the second `transferWithAuthorization`
     // call would revert. We pre-check it so we don't have to pay a
     // facilitator round trip (and a potential receipt poll) for a no-op.
-    match check_authorization_state(
-        rpc_url,
-        &expected.asset,
-        nonce_key.from,
-        nonce_key.nonce,
-    )
-    .await
+    match check_authorization_state(rpc_url, &expected.asset, nonce_key.from, nonce_key.nonce).await
     {
         Ok(true) => {
             telemetry::record_settlement_error(
@@ -480,9 +482,7 @@ async fn handle_payment(
     // collector (already wired for Solana via the same header constant)
     // can show it.
     if let Ok(value) = axum::http::HeaderValue::from_str(&tx_hash) {
-        response
-            .headers_mut()
-            .insert(PAYMENT_RECEIPT_HEADER, value);
+        response.headers_mut().insert(PAYMENT_RECEIPT_HEADER, value);
     }
     response
 }
@@ -496,11 +496,7 @@ fn decode_payment_payload(header: &str) -> Result<serde_json::Value, String> {
 }
 
 fn pick_currency_symbols(operator: &pay_types::metering::OperatorConfig) -> Vec<String> {
-    let list = operator
-        .currencies
-        .get("usd")
-        .cloned()
-        .unwrap_or_default();
+    let list = operator.currencies.get("usd").cloned().unwrap_or_default();
     if list.is_empty() {
         vec!["USDC".to_string()]
     } else {
@@ -546,30 +542,29 @@ async fn build_evm_requirements(
     let token: alloy::primitives::Address = asset
         .parse()
         .map_err(|e| format!("token address `{asset}` parse failed: {e}"))?;
-    let meta: EvmTokenMeta = match evm_token_meta::fetch_token_meta(
-        rpc_url, chain_id, token, Some(currency_symbol),
-    )
-    .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                network = %network_slug,
-                currency = %currency_symbol,
-                "fetch_token_meta failed — using static fallback for envelope"
-            );
-            EvmTokenMeta {
-                decimals: evm_stablecoin_decimals(currency_symbol).ok_or_else(|| {
-                    format!(
-                        "Unknown stablecoin `{currency_symbol}` and on-chain decimals() \
+    let meta: EvmTokenMeta =
+        match evm_token_meta::fetch_token_meta(rpc_url, chain_id, token, Some(currency_symbol))
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    network = %network_slug,
+                    currency = %currency_symbol,
+                    "fetch_token_meta failed — using static fallback for envelope"
+                );
+                EvmTokenMeta {
+                    decimals: evm_stablecoin_decimals(currency_symbol).ok_or_else(|| {
+                        format!(
+                            "Unknown stablecoin `{currency_symbol}` and on-chain decimals() \
                          call failed — cannot build envelope"
-                    )
-                })?,
-                eip712_domain: evm_token_meta::static_fallback_domain(chain_id),
+                        )
+                    })?,
+                    eip712_domain: evm_token_meta::static_fallback_domain(chain_id),
+                }
             }
-        }
-    };
+        };
 
     let decimals = meta.decimals as u32;
     let scaled = amount_usd * 10f64.powi(decimals as i32);
@@ -932,11 +927,10 @@ mod tests {
 
     #[test]
     fn pick_currency_symbols_returns_configured_list() {
-        let op: pay_types::metering::OperatorConfig =
-            serde_json::from_value(serde_json::json!({
-                "currencies": { "usd": ["USDC", "USDT"] }
-            }))
-            .unwrap();
+        let op: pay_types::metering::OperatorConfig = serde_json::from_value(serde_json::json!({
+            "currencies": { "usd": ["USDC", "USDT"] }
+        }))
+        .unwrap();
         let syms = pick_currency_symbols(&op);
         assert_eq!(syms, vec!["USDC", "USDT"]);
     }

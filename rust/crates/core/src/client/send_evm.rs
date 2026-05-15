@@ -58,9 +58,7 @@ pub fn send_erc20(req: EvmSendRequest<'_>) -> Result<EvmSendResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| {
-            crate::Error::Config(format!("Failed to build runtime for EVM send: {e}"))
-        })?;
+        .map_err(|e| crate::Error::Config(format!("Failed to build runtime for EVM send: {e}")))?;
     rt.block_on(send_erc20_async(req))
 }
 
@@ -87,22 +85,18 @@ async fn send_erc20_async(req: EvmSendRequest<'_>) -> Result<EvmSendResult> {
     // 2) Load the user's secp256k1 signer via the same path Phase 11 uses,
     //    so keystore prompts and ephemeral fall-through stay consistent.
     let store = FileAccountsStore::default_path();
-    let (signer, _ephemeral) = crate::signer::load_evm_signer_for_network(
-        req.network,
-        &store,
-        req.account_override,
-    )?;
+    let (signer, _ephemeral) =
+        crate::signer::load_evm_signer_for_network(req.network, &store, req.account_override)?;
     let from_addr = signer.signer.address();
 
     // 3) Token registry — symbol + network determines contract + decimals.
-    let token_hex = evm_stablecoin_address(req.network, req.stablecoin_symbol).ok_or_else(
-        || {
+    let token_hex =
+        evm_stablecoin_address(req.network, req.stablecoin_symbol).ok_or_else(|| {
             crate::Error::Config(format!(
                 "{} is not deployed on `{}` in pay's token registry",
                 req.stablecoin_symbol, req.network
             ))
-        },
-    )?;
+        })?;
     let token_addr = Address::from_str(token_hex)
         .map_err(|e| crate::Error::Config(format!("Bad token address `{token_hex}`: {e}")))?;
     let decimals = evm_stablecoin_decimals(req.stablecoin_symbol).ok_or_else(|| {
@@ -156,9 +150,7 @@ async fn send_erc20_async(req: EvmSendRequest<'_>) -> Result<EvmSendResult> {
         .transfer(to_addr, amount_raw)
         .send()
         .await
-        .map_err(|e| {
-            crate::Error::Config(format!("eth_sendRawTransaction failed: {e}"))
-        })?;
+        .map_err(|e| crate::Error::Config(format!("eth_sendRawTransaction failed: {e}")))?;
     let receipt = pending
         .with_required_confirmations(1)
         .get_receipt()

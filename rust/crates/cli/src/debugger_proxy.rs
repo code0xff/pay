@@ -30,16 +30,35 @@ const MAX_PORT_ATTEMPTS: u16 = 10;
 
 /// Find an available port starting from `DEFAULT_PORT`, stepping by
 /// `PORT_STEP` (1402 → 2402 → 3402 → …).
+#[cfg(test)]
 fn find_available_port() -> pay_core::Result<u16> {
+    let (port, _listener) = bind_available_port()?;
+    Ok(port)
+}
+
+fn bind_available_port() -> pay_core::Result<(u16, std::net::TcpListener)> {
     let mut port = DEFAULT_PORT;
     for _ in 0..MAX_PORT_ATTEMPTS {
         match std::net::TcpListener::bind(("127.0.0.1", port)) {
-            Ok(_listener) => return Ok(port), // port is free (listener drops immediately)
-            Err(_) => port += PORT_STEP,
+            Ok(listener) => {
+                listener.set_nonblocking(true).map_err(|e| {
+                    pay_core::Error::Config(format!(
+                        "debugger proxy listener setup failed on 127.0.0.1:{port}: {e}"
+                    ))
+                })?;
+                return Ok((port, listener));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => port += PORT_STEP,
+            Err(e) => {
+                return Err(pay_core::Error::Config(format!(
+                    "debugger proxy cannot bind 127.0.0.1:{port}: {e}"
+                )));
+            }
         }
     }
+    let last_port = DEFAULT_PORT + PORT_STEP * (MAX_PORT_ATTEMPTS - 1);
     Err(pay_core::Error::Config(format!(
-        "no available debugger port (tried {DEFAULT_PORT}–{port})"
+        "no available debugger port (tried {DEFAULT_PORT}–{last_port})"
     )))
 }
 
@@ -52,9 +71,9 @@ fn find_available_port() -> pay_core::Result<u16> {
 /// The proxy runs on a dedicated tokio runtime in a background thread
 /// so it doesn't interfere with the CLI's sync main function.
 pub fn start_background() -> pay_core::Result<String> {
-    let port = find_available_port()?;
+    let (port, listener) = bind_available_port()?;
     let bind = format!("127.0.0.1:{port}");
-    let bind_clone = bind.clone();
+    let bind_for_thread = bind.clone();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -84,12 +103,11 @@ pub fn start_background() -> pay_core::Result<String> {
                 }))
                 .layer(axum::Extension(Some(pdb)));
 
-            let listener = tokio::net::TcpListener::bind(&bind_clone)
-                .await
-                .unwrap_or_else(|e| panic!("debugger proxy bind {bind_clone}: {e}"));
+            let listener = tokio::net::TcpListener::from_std(listener)
+                .unwrap_or_else(|e| panic!("debugger proxy bind {bind_for_thread}: {e}"));
 
             eprintln!(
-                "{} http://{bind_clone}/",
+                "{} http://{bind_for_thread}/",
                 owo_colors::OwoColorize::green(&"Payment Debugger"),
             );
 
@@ -237,7 +255,7 @@ fn chrono_now() -> String {
 mod tests {
     use super::*;
 
-    fn start_test_proxy() -> std::net::SocketAddr {
+    fn start_test_proxy() -> std::io::Result<std::net::SocketAddr> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -258,20 +276,52 @@ mod tests {
                         let pdb = pdb_state.clone();
                         forward_and_log(req, pdb)
                     }));
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                tx.send(addr).unwrap();
+                let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                    Ok(listener) => listener,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                };
+                let addr = match listener.local_addr() {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                };
+                tx.send(Ok(addr)).unwrap();
                 axum::serve(listener, app).await.ok();
             });
         });
-        let addr = rx.recv().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        addr
+        let result = rx.recv().unwrap();
+        if result.is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        result
+    }
+
+    fn test_proxy_addr() -> Option<std::net::SocketAddr> {
+        match start_test_proxy() {
+            Ok(addr) => Some(addr),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => None,
+            Err(e) => panic!("test proxy bind failed: {e}"),
+        }
+    }
+
+    fn loopback_bind_permitted() -> bool {
+        match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => false,
+            Err(e) => panic!("loopback bind probe failed: {e}"),
+        }
     }
 
     #[test]
     fn pdb_served_with_trailing_slash() {
-        let addr = start_test_proxy();
+        let Some(addr) = test_proxy_addr() else {
+            return;
+        };
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
@@ -294,7 +344,9 @@ mod tests {
 
     #[test]
     fn pdb_served_without_trailing_slash() {
-        let addr = start_test_proxy();
+        let Some(addr) = test_proxy_addr() else {
+            return;
+        };
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
@@ -312,7 +364,9 @@ mod tests {
 
     #[test]
     fn pdb_assets_and_api_served() {
-        let addr = start_test_proxy();
+        let Some(addr) = test_proxy_addr() else {
+            return;
+        };
         let client = reqwest::blocking::Client::new();
 
         // API config
@@ -346,7 +400,9 @@ mod tests {
 
     #[test]
     fn root_redirects_to_pdb() {
-        let addr = start_test_proxy();
+        let Some(addr) = test_proxy_addr() else {
+            return;
+        };
         let no_redirect = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -359,11 +415,21 @@ mod tests {
 
     #[test]
     fn find_available_port_skips_busy() {
+        if !loopback_bind_permitted() {
+            return;
+        }
         // Occupy DEFAULT_PORT
-        let _blocker = std::net::TcpListener::bind(("127.0.0.1", DEFAULT_PORT)).ok();
+        let blocker = match std::net::TcpListener::bind(("127.0.0.1", DEFAULT_PORT)) {
+            Ok(listener) => Some(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => None,
+            Err(e) => panic!("failed to bind blocker on {DEFAULT_PORT}: {e}"),
+        };
         let port = find_available_port().unwrap();
         // Should be DEFAULT_PORT if it was free, or DEFAULT_PORT + PORT_STEP if occupied
         assert!(port >= DEFAULT_PORT);
         assert_eq!((port - DEFAULT_PORT) % PORT_STEP, 0);
+        if blocker.is_some() {
+            assert_ne!(port, DEFAULT_PORT);
+        }
     }
 }

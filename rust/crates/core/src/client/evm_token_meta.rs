@@ -72,8 +72,9 @@ fn cache() -> &'static RwLock<CacheMap> {
 /// older deployments are missing. Both calls fall back gracefully:
 ///   - missing `decimals()` → symbol-based fallback via `fallback_symbol`
 ///   - missing `eip712Domain()` → `static_fallback_domain(chain_id)`
-/// so the gateway can still respond rather than 500-ing on a marginal
-/// token that doesn't implement EIP-5267 yet.
+///
+/// This keeps the gateway from 500-ing on a marginal token that doesn't
+/// implement EIP-5267 yet.
 pub async fn fetch_token_meta(
     rpc_url: &str,
     chain_id: u64,
@@ -128,7 +129,10 @@ pub async fn fetch_token_meta(
         decimals,
         eip712_domain: domain,
     };
-    cache().write().await.insert((chain_id, token), meta.clone());
+    cache()
+        .write()
+        .await
+        .insert((chain_id, token), meta.clone());
     Ok(meta)
 }
 
