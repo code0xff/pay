@@ -13,7 +13,7 @@ fn stabledomains_openapi_resolves() {
     let endpoints = resolve_endpoints(&src, "https://stabledomains.dev")
         .expect("resolver should succeed against live stabledomains openapi");
     let by_path: std::collections::HashSet<_> =
-        endpoints.iter().map(|e| (&*e.method, &*e.path)).collect();
+        endpoints.iter().map(|e| (&*e.spec.method, &*e.spec.path)).collect();
     assert!(by_path.contains(&("POST", "api/register")));
     assert!(by_path.contains(&("POST", "api/domain/dns")));
     assert!(by_path.contains(&("POST", "api/domain/renew")));
