@@ -39,7 +39,7 @@ use solana_x402::{PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER, X402_V1_PAY
 use crate::PaymentState;
 use crate::accounts::is_evm_network_family;
 use crate::chain::ChainFamily;
-use crate::client::balance::evm_stablecoin_address;
+use crate::client::balance::{evm_stablecoin_address, evm_stablecoin_decimals};
 use crate::server::in_flight::{InFlight, NonceKey};
 use crate::server::metering::{self, RequestProperties};
 use crate::server::telemetry;
@@ -484,9 +484,10 @@ fn build_evm_requirements(
     let asset = evm_stablecoin_address(network_slug, currency_symbol).ok_or_else(|| {
         format!("No known ERC-20 deployment for {currency_symbol} on {network_slug}")
     })?;
-    // USDC is 6-decimal on every supported chain. Generalize when we add
-    // non-USDC support; for now this matches the registry's pinned tokens.
-    let decimals = 6u32;
+    let decimals = evm_stablecoin_decimals(currency_symbol).ok_or_else(|| {
+        format!("Unknown decimal places for stablecoin `{currency_symbol}` — \
+                 add it to evm_stablecoin_decimals")
+    })? as u32;
     // Validate the price before scaling: `as u128` on an f64 saturates
     // (NaN→0, negative→0, oversize→u128::MAX), which silently emits free /
     // outrageously-priced envelopes. Reject those at the source.

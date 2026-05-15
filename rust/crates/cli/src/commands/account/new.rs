@@ -604,12 +604,20 @@ fn print_evm_next_steps(
     );
     eprintln!("  {} {} on {}", "address".dimmed(), address, network.green());
     eprintln!();
+    let topup_cmd = if name == pay_core::accounts::DEFAULT_ACCOUNT_NAME {
+        format!("pay topup --network {network}")
+    } else {
+        format!("pay topup --network {network} --account {name}")
+    };
     crate::components::print_notice(
         crate::components::NoticeLevel::Info,
         "Fund the wallet",
         &format!(
-            "EVM accounts can't be funded with `pay topup` yet — use a wallet \
-             like MetaMask or a {network} faucet, then re-run with:\n\
+            "Send USDC from a wallet (MetaMask, Coinbase Wallet, or a \
+             faucet on testnets) to the address above. Then either watch \
+             the balance live with:\n\
+             $ {topup_cmd}\n\
+             or jump straight in:\n\
              $ pay --network {network} --account {name} whoami",
         ),
     );

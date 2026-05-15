@@ -40,6 +40,24 @@ pub fn solana_transaction_link(signature: &str, cluster: &SolanaExplorerCluster)
     link_with_arrow("Link to receipt", &url)
 }
 
+/// Link to an EVM transaction receipt on the per-chain block explorer.
+/// Mirrors the `evm_explorer_url` mapping used for address links so a Phase
+/// 7 explorer override flows to both surfaces.
+pub fn evm_transaction_link(tx_hash: &str, network: &str) -> String {
+    let base = match network {
+        "ethereum" => "https://etherscan.io/tx",
+        "base" => "https://basescan.org/tx",
+        "optimism" => "https://optimistic.etherscan.io/tx",
+        "arbitrum" => "https://arbiscan.io/tx",
+        "sepolia" => "https://sepolia.etherscan.io/tx",
+        "holesky" => "https://holesky.etherscan.io/tx",
+        "base-sepolia" => "https://sepolia.basescan.org/tx",
+        _ => "https://etherscan.io/tx",
+    };
+    let url = format!("{base}/{tx_hash}");
+    link_with_arrow("Link to receipt", &url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

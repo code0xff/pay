@@ -1,3 +1,6 @@
+#[cfg(feature = "evm")]
+use owo_colors::OwoColorize;
+
 use crate::{components, network::SolanaNetwork};
 
 /// Import funds from Venmo, PayPal, or a mobile wallet.
@@ -14,11 +17,21 @@ pub struct TopupCommand {
 
 impl TopupCommand {
     pub fn run(self, network_override: Option<&str>) -> pay_core::Result<()> {
-        // `pay topup` is Solana-only. Reject EVM slugs at the entry so a
-        // `--network sepolia` invocation doesn't drop into the Solana
-        // funding flow with confusing downstream errors.
-        if let Some(slug) = network_override {
-            crate::commands::send::reject_evm_network("topup", slug)?;
+        // Phase 12-4: EVM networks get a faucet/wallet hint plus a short
+        // balance-polling loop. They never enter the Solana TUI flow.
+        if let Some(slug) = network_override
+            && pay_core::accounts::is_evm_network_family(slug)
+        {
+            #[cfg(feature = "evm")]
+            {
+                return run_evm_topup(slug, self.account.as_deref());
+            }
+            #[cfg(not(feature = "evm"))]
+            {
+                return Err(pay_core::Error::Config(format!(
+                    "`pay topup --network {slug}` requires the `evm` Cargo feature."
+                )));
+            }
         }
 
         let config = pay_core::Config::load().unwrap_or_default();
@@ -128,6 +141,120 @@ pub(crate) fn topup_received_amount(
     (!amount.is_empty()).then_some(amount)
 }
 
+/// Hint string mapped by EVM network slug — testnet faucets get explicit
+/// URLs; mainnets fall back to a generic wallet-or-exchange note since pay
+/// doesn't itself broker fiat-on-ramp for EVM yet.
+#[cfg(feature = "evm")]
+fn evm_funding_hint(network: &str) -> &'static str {
+    match network {
+        "sepolia" => "Sepolia faucet: https://www.alchemy.com/faucets/ethereum-sepolia",
+        "base-sepolia" => "Base-Sepolia faucet: https://www.alchemy.com/faucets/base-sepolia",
+        "holesky" => "Holesky faucet: https://www.alchemy.com/faucets/ethereum-holesky",
+        _ => "Send funds from MetaMask, Coinbase Wallet, or a centralized exchange.",
+    }
+}
+
+#[cfg(feature = "evm")]
+fn run_evm_topup(network: &str, account_override: Option<&str>) -> pay_core::Result<()> {
+    use std::time::{Duration, Instant};
+
+    let accounts = pay_core::accounts::AccountsFile::load()?;
+    let (account_name, address) = match account_override {
+        Some(name) => {
+            let acct = accounts
+                .named_account_for_network(network, name)
+                .ok_or_else(|| {
+                    pay_core::Error::Config(format!(
+                        "No account `{name}` configured on {network}"
+                    ))
+                })?;
+            let pubkey = acct.pubkey.clone().ok_or_else(|| {
+                pay_core::Error::Config(format!(
+                    "Account `{name}` on {network} has no pubkey"
+                ))
+            })?;
+            (name.to_string(), pubkey)
+        }
+        None => match accounts.account_for_network(network) {
+            Some((name, account)) => {
+                let pubkey = account.pubkey.clone().ok_or_else(|| {
+                    pay_core::Error::Config("Account has no pubkey".to_string())
+                })?;
+                (name.to_string(), pubkey)
+            }
+            None => {
+                return Err(pay_core::Error::Config(format!(
+                    "No {network} account found. Run `pay account new --chain-family evm --network {network}` first."
+                )));
+            }
+        },
+    };
+
+    eprintln!();
+    eprintln!(
+        "  {}  {}  on  {}",
+        "topup".dimmed(),
+        address.green(),
+        network.green()
+    );
+    eprintln!("  {}", evm_funding_hint(network).dimmed());
+    eprintln!();
+    eprintln!("  {}", "Polling for incoming USDC for 60 seconds (^C to abort)...".dimmed());
+
+    // Read the baseline once so any inbound delta during the wait is
+    // attributable to this topup attempt.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| pay_core::Error::Config(format!("Failed to build polling runtime: {e}")))?;
+    let baseline_usdc = rt
+        .block_on(pay_core::balance::get_evm_balances(network, &address))
+        .ok()
+        .and_then(usdc_raw_amount)
+        .unwrap_or(0);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(3));
+        let current = match rt.block_on(pay_core::balance::get_evm_balances(network, &address)) {
+            Ok(b) => usdc_raw_amount(b).unwrap_or(0),
+            Err(_) => continue,
+        };
+        if current > baseline_usdc {
+            let delta = current - baseline_usdc;
+            // USDC is 6-decimal on every EVM chain pay tracks; if more
+            // tokens land later, route this through evm_stablecoin_decimals.
+            let display = format!("{:.6}", delta as f64 / 1_000_000.0);
+            components::print_notice(
+                components::NoticeLevel::Success,
+                "Account funded",
+                &format!("Received {} USDC at {}.", display, address),
+            );
+            return Ok(());
+        }
+    }
+
+    components::print_notice(
+        components::NoticeLevel::Warning,
+        "No funds detected within 60s",
+        &format!(
+            "No incoming USDC observed at {address}.\n\
+             Once the on-chain transfer mines, run:\n\
+             $ pay --network {network} --account {account_name} whoami"
+        ),
+    );
+    Ok(())
+}
+
+#[cfg(feature = "evm")]
+fn usdc_raw_amount(balances: pay_core::client::balance::AccountBalances) -> Option<u64> {
+    balances
+        .tokens
+        .into_iter()
+        .find(|t| t.symbol == Some("USDC"))
+        .map(|t| t.raw_amount)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,15 +275,21 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "evm")]
     #[test]
-    fn topup_rejects_evm_network_with_clear_error() {
-        let cmd = TopupCommand {
-            account: None,
-            sandbox: false,
-        };
-        let err = cmd.run(Some("sepolia")).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("not yet supported on EVM"));
-        assert!(msg.contains("sepolia"));
+    fn evm_funding_hint_uses_known_faucet_for_sepolia() {
+        let hint = evm_funding_hint("sepolia");
+        assert!(hint.contains("Sepolia"));
+        assert!(hint.contains("https://"));
+    }
+
+    #[cfg(feature = "evm")]
+    #[test]
+    fn evm_funding_hint_falls_back_to_wallet_note_for_mainnet() {
+        // Mainnet EVMs don't have a faucet; the hint should redirect the
+        // user to an external wallet flow instead of fabricating a URL.
+        let hint = evm_funding_hint("ethereum");
+        assert!(hint.contains("MetaMask") || hint.contains("Wallet"));
+        assert!(!hint.contains("faucet"));
     }
 }

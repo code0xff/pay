@@ -407,7 +407,10 @@ async fn rpc_call(
 // slug, since the RPC URL alone is not enough to distinguish chain families.
 
 #[cfg(feature = "evm")]
-pub use evm_balances::{evm_default_rpc_url, evm_rpc_url, evm_stablecoin_address, get_evm_balances};
+pub use evm_balances::{
+    evm_default_rpc_url, evm_rpc_url, evm_stablecoin_address, evm_stablecoin_decimals,
+    get_evm_balances,
+};
 
 #[cfg(feature = "evm")]
 mod evm_balances {
@@ -443,6 +446,20 @@ mod evm_balances {
     pub fn evm_rpc_url(network: &str) -> String {
         let env_key = format!("PAY_{}_RPC_URL", network.to_uppercase().replace('-', "_"));
         std::env::var(&env_key).unwrap_or_else(|_| evm_default_rpc_url(network).to_string())
+    }
+
+    /// Decimal places for an ERC-20 stablecoin symbol. Centralized so the
+    /// balance fetcher, the x402 server envelope builder, and the `pay send`
+    /// EVM path all agree. Returns `None` for symbols we don't know — callers
+    /// surface that as an explicit error rather than guessing.
+    pub fn evm_stablecoin_decimals(symbol: &str) -> Option<u8> {
+        match symbol {
+            // USDC and USDT use 6 decimals on every chain we currently
+            // advertise; DAI/USDS-style 18-decimal tokens land here when added.
+            "USDC" | "USDT" => Some(6),
+            "DAI" => Some(18),
+            _ => None,
+        }
     }
 
     /// Well-known ERC-20 stablecoin contract addresses per network.
@@ -512,12 +529,17 @@ mod evm_balances {
             let Some(contract_addr) = evm_stablecoin_address(network, symbol) else {
                 continue;
             };
+            // `evm_stablecoin_decimals` is the single source of truth — if a
+            // new symbol shows up in `evm_stablecoin_address` but is missing
+            // here, the loop skips it instead of mis-formatting.
+            let Some(decimals) = evm_stablecoin_decimals(symbol) else {
+                continue;
+            };
             let contract = Address::from_str(contract_addr).expect("static stablecoin address");
             let erc20 = IERC20::new(contract, &provider);
             match erc20.balanceOf(addr).call().await {
                 Ok(raw) if raw > U256::ZERO => {
-                    // USDC/USDT both use 6 decimals on every chain we list.
-                    let ui = format_units(raw, 6u8)
+                    let ui = format_units(raw, decimals)
                         .ok()
                         .and_then(|s| s.parse::<f64>().ok())
                         .unwrap_or(0.0);

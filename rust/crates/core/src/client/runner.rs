@@ -517,16 +517,64 @@ pub(crate) fn parse_verification_failure(body: Option<&str>) -> Option<(String, 
     if v.get("error")?.as_str()? != "verification_failed" {
         return None;
     }
-    let message = v
+    let raw_message = v
         .get("message")
         .and_then(|m| m.as_str())
-        .unwrap_or("payment verification failed")
-        .to_string();
+        .unwrap_or("payment verification failed");
     let retryable = v
         .get("retryable")
         .and_then(|r| r.as_bool())
         .unwrap_or(false);
-    Some((message, retryable))
+    Some((readable_evm_verification_message(raw_message), retryable))
+}
+
+/// Append a remediation hint when the server's raw message looks like an
+/// EVM/facilitator failure mode the user can act on. Leaves non-matching
+/// messages (Solana errors, opaque facilitator strings) untouched so we
+/// don't paper over unfamiliar failures with bogus advice.
+pub(crate) fn readable_evm_verification_message(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let hint = if lower.contains("insufficient funds")
+        || lower.contains("transfer_amount_exceeds_balance")
+        || lower.contains("erc20: transfer amount exceeds balance")
+    {
+        Some("Top up USDC on this EVM network before retrying.")
+    } else if lower.contains("authorization already used")
+        || lower.contains("authorization_used")
+        || lower.contains("nonce already used")
+        || lower.contains("duplicate nonce")
+    {
+        Some(
+            "The same payment authorization was already used. \
+             Trigger a fresh request so the client mints a new nonce.",
+        )
+    } else if lower.contains("on-chain receipt")
+        || lower.contains("on-chain value")
+        || lower.contains("transfer log")
+    {
+        Some(
+            "The facilitator's claimed settlement did not match the \
+             expected on-chain transfer. The gateway will not forward this \
+             request — contact the operator if it keeps recurring.",
+        )
+    } else if lower.contains("invalid signature") || lower.contains("eip-712 domain") {
+        Some(
+            "EIP-712 signature did not verify for this token. The token may \
+             have a custom (name, version) domain pay does not know about — \
+             report this with the network slug.",
+        )
+    } else if lower.contains("being processed") || lower.contains("in_flight_duplicate") {
+        Some(
+            "Another request with this payment authorization is still in \
+             flight. Wait for it to settle or retry with a new payment.",
+        )
+    } else {
+        None
+    };
+    match hint {
+        Some(h) => format!("{raw}\n  → {h}"),
+        None => raw.to_string(),
+    }
 }
 
 fn check_command_exists(cmd: &str) -> Result<()> {

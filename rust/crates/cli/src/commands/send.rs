@@ -66,7 +66,33 @@ impl SendCommand {
         let recipient_input = self.recipient;
         let config = pay_core::Config::load().unwrap_or_default();
         let network = network_override.unwrap_or(pay_core::accounts::MAINNET_NETWORK);
-        reject_evm_network("send", network)?;
+
+        // Phase 12-3: route EVM networks to the alloy-based ERC-20 transfer
+        // path. The Solana flow below is left untouched.
+        if pay_core::accounts::is_evm_network_family(network) {
+            #[cfg(feature = "evm")]
+            {
+                return run_evm_send(
+                    &amount,
+                    &recipient_input,
+                    self.currency.as_deref(),
+                    self.memo.as_deref(),
+                    self.memo_hex.as_deref(),
+                    self.fee_within,
+                    network,
+                    account_override,
+                    verbose,
+                );
+            }
+            #[cfg(not(feature = "evm"))]
+            {
+                return Err(pay_core::Error::Config(format!(
+                    "`pay send --network {network}` requires the `evm` Cargo \
+                     feature. Rebuild with `cargo build -p pay --features evm`."
+                )));
+            }
+        }
+
         let rpc_url = configured_rpc_url(&config);
         let fee_within = effective_fee_within(&amount, self.fee_within);
         let recipient = resolve_recipient_pubkey(&recipient_input, network)?;
@@ -118,18 +144,76 @@ impl SendCommand {
     }
 }
 
-/// Reject EVM network slugs at command entry. `pay send` and `pay topup` are
-/// Solana-only today; without this guard a `--network sepolia` invocation
-/// would otherwise descend into Solana key/RPC paths and surface confusing
-/// errors (empty balances, `MemorySigner::from_bytes` failures, etc.).
-pub(crate) fn reject_evm_network(sub: &str, network: &str) -> pay_core::Result<()> {
-    if pay_core::accounts::is_evm_network_family(network) {
-        return Err(pay_core::Error::Config(format!(
-            "`pay {sub}` is not yet supported on EVM networks (got `{network}`). \
-             For now use a wallet like MetaMask to manage EVM balances; \
-             `pay account list` and `pay whoami` show them read-only."
-        )));
+#[cfg(feature = "evm")]
+#[allow(clippy::too_many_arguments)]
+fn run_evm_send(
+    amount: &str,
+    recipient: &str,
+    currency: Option<&str>,
+    memo: Option<&str>,
+    memo_hex: Option<&str>,
+    fee_within: bool,
+    network: &str,
+    account_override: Option<&str>,
+    verbose: bool,
+) -> pay_core::Result<()> {
+    if memo.is_some() || memo_hex.is_some() {
+        return Err(pay_core::Error::Config(
+            "--memo / --memo-hex are not supported on EVM networks. ERC-20 \
+             `transfer` has no on-chain memo field; attach side-channel \
+             metadata instead."
+                .to_string(),
+        ));
     }
+    if fee_within {
+        // Not an error — gas is paid in ETH separately from the stablecoin
+        // amount, so the flag is meaningless. Warn so the user notices it
+        // had no effect.
+        eprintln!(
+            "{}",
+            "warn: --fee-within is a no-op on EVM (gas is paid in native ETH, not the stablecoin)"
+                .yellow()
+        );
+    }
+    let symbol = currency.unwrap_or("USDC").to_uppercase();
+    let amount_display = if sends_entire_balance(amount) {
+        format!("max {symbol}")
+    } else {
+        format!("{amount} {symbol}")
+    };
+    if verbose {
+        eprintln!(
+            "{}",
+            format!("Sending {amount_display} to {recipient} on {network}...").dimmed()
+        );
+    }
+
+    let result = pay_core::client::send_evm::send_erc20(
+        pay_core::client::send_evm::EvmSendRequest {
+            amount,
+            recipient,
+            stablecoin_symbol: &symbol,
+            network,
+            account_override,
+        },
+    )?;
+
+    let amount_sent = pay_core::send::format_token_amount(
+        result.amount_raw.min(u64::MAX as u128) as u64,
+        result.decimals,
+    );
+    let title = format!("Sent {amount_sent} {} to {}", result.currency, result.to);
+    let body = format!(
+        "{} {}",
+        crate::components::evm_transaction_link(&result.signature, network),
+        result.signature
+    );
+    crate::components::print_notice_with_machine_output(
+        crate::components::NoticeLevel::Success,
+        &title,
+        &body,
+        &result.signature,
+    );
     Ok(())
 }
 

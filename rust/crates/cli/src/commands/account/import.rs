@@ -292,6 +292,11 @@ impl ImportCommand {
         );
         accounts.save()?;
 
+        // Phase 12-2: match the Solana flow which prints `Balance: $X.XX USDC`
+        // before the account list. EVM imports were silent on balance, which
+        // made the user wonder whether the import had actually registered.
+        display_evm_balance(network, &address);
+
         super::list::print_account_list(
             &accounts,
             Some(super::list::Highlight::Green {
@@ -301,6 +306,30 @@ impl ImportCommand {
         );
         Ok(())
     }
+}
+
+#[cfg(feature = "evm")]
+fn display_evm_balance(network: &str, address: &str) {
+    // The EVM balance fetch is async and the surrounding command is
+    // synchronous, so spin up a small runtime. The user already paid a
+    // similar latency on `pay account list` so this won't surprise anyone.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("  {} balance lookup runtime: {e}", "!".yellow());
+            return;
+        }
+    };
+    let bal = rt.block_on(pay_core::balance::get_evm_balances(network, address));
+    let rpc_url = pay_core::balance::evm_rpc_url(network);
+    let display = match bal {
+        Ok(b) => super::list::format_balance_display(Some(&b), Some(address), network, &rpc_url),
+        Err(e) => format!("(unavailable: {e})"),
+    };
+    eprintln!("  {}  {}", "Balance:".dimmed(), display);
 }
 
 fn find_account_by_pubkey<'a>(
