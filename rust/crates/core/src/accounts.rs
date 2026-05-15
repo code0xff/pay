@@ -196,6 +196,14 @@ impl Account {
         self.chain_family.as_deref() == Some("evm")
     }
 
+    /// True when the account is EVM-family AND its private key lives in an OS
+    /// keystore (Apple Keychain / GNOME Keyring / Windows / 1Password) rather
+    /// than inline `secret_key_hex`. The signer loader takes the keystore
+    /// path for these and the inline path otherwise.
+    pub fn is_evm_keystore(&self) -> bool {
+        self.is_evm() && !matches!(self.keystore, Keystore::Ephemeral)
+    }
+
     /// Decoded 32-byte EVM private key for EVM ephemeral accounts. Returns
     /// `None` for non-EVM accounts or when `secret_key_hex` is missing.
     #[cfg(feature = "evm")]

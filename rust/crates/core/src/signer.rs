@@ -561,13 +561,31 @@ pub fn load_evm_signer_for_network(
                  (missing `chain_family: evm` in accounts.yml)"
             )));
         }
-        let key_hex = account.secret_key_hex.as_deref().ok_or_else(|| {
-            Error::Config(format!(
-                "EVM account `{account_name}` on `{network}` is missing \
-                 `secret_key_hex`. Keystore-backed EVM accounts are not yet supported."
-            ))
-        })?;
-        let signer = EvmChainSigner::from_hex(key_hex, chain_id)?;
+
+        // (A) Inline ephemeral hex — Phase 2 path. Used for auto-generated
+        //     testnet wallets and `pay account import --secret-key-hex`.
+        if matches!(account.keystore, crate::accounts::Keystore::Ephemeral) {
+            let key_hex = account.secret_key_hex.as_deref().ok_or_else(|| {
+                Error::Config(format!(
+                    "Ephemeral EVM account `{account_name}` on `{network}` is missing `secret_key_hex`"
+                ))
+            })?;
+            let signer = EvmChainSigner::from_hex(key_hex, chain_id)?;
+            return Ok((signer, None));
+        }
+
+        // (B) Keystore-backed — Phase 9. Pull the 32-byte secp256k1 privkey
+        //     out of the OS keystore using the same auth flow that ed25519
+        //     accounts use, then hand the hex string to alloy's signer.
+        let intent = crate::keystore::AuthIntent::from_reason(&format!(
+            "load EVM account `{account_name}` on `{network}`"
+        ));
+        let ks = evm_keystore_backend_for(&account)?;
+        let bytes = ks
+            .load_evm_key_with_intent(account_name, &intent)
+            .map_err(|e| map_keystore_backend_error(evm_backend_label(&account), e))?;
+        let hex_key = hex::encode(&*bytes);
+        let signer = EvmChainSigner::from_hex(&hex_key, chain_id)?;
         return Ok((signer, None));
     }
 
@@ -584,6 +602,83 @@ pub fn load_evm_signer_for_network(
         "No EVM account configured for network `{network}`. \
          Add one to ~/.config/pay/accounts.yml with `chain_family: evm`."
     )))
+}
+
+/// Build the OS keystore backend a keystore-backed EVM account points at.
+///
+/// Mirrors the Solana branch in `load_keypair_bytes_from_account_with_intent`
+/// but for the EVM (32-byte secp256k1) variants. Returns `Err` on platforms
+/// where the requested backend isn't available, or for `Ephemeral` / `File`
+/// which the caller handles directly.
+#[cfg(feature = "evm")]
+fn evm_keystore_backend_for(
+    account: &crate::accounts::Account,
+) -> Result<crate::keystore::Keystore> {
+    match account.keystore {
+        crate::accounts::Keystore::AppleKeychain => {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(crate::keystore::Keystore::apple_keychain())
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(Error::Config(
+                    "Apple Keychain is not available on this platform".to_string(),
+                ))
+            }
+        }
+        crate::accounts::Keystore::GnomeKeyring => {
+            #[cfg(target_os = "linux")]
+            {
+                Ok(crate::keystore::Keystore::gnome_keyring())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(Error::Config(
+                    "GNOME Keyring is not available on this platform".to_string(),
+                ))
+            }
+        }
+        crate::accounts::Keystore::WindowsHello => {
+            #[cfg(target_os = "windows")]
+            {
+                Ok(crate::keystore::Keystore::windows_hello())
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Err(Error::Config(
+                    "Windows Hello is not available on this platform".to_string(),
+                ))
+            }
+        }
+        crate::accounts::Keystore::OnePassword => {
+            let op_account = account.account.clone();
+            Ok(if let Some(vault) = &account.vault {
+                crate::keystore::Keystore::onepassword_with_vault(vault.clone(), op_account)
+            } else {
+                crate::keystore::Keystore::onepassword(op_account)
+            })
+        }
+        crate::accounts::Keystore::File => Err(Error::Config(
+            "File-backed EVM accounts are not supported — use `keystore: ephemeral` with inline `secret_key_hex` or move the key into an OS keystore".to_string(),
+        )),
+        crate::accounts::Keystore::Ephemeral => {
+            unreachable!("Ephemeral EVM accounts are handled before this dispatch")
+        }
+    }
+}
+
+/// Stable telemetry/error label per EVM keystore backend.
+#[cfg(feature = "evm")]
+fn evm_backend_label(account: &crate::accounts::Account) -> &'static str {
+    match account.keystore {
+        crate::accounts::Keystore::AppleKeychain => "keychain",
+        crate::accounts::Keystore::GnomeKeyring => "gnome-keyring",
+        crate::accounts::Keystore::WindowsHello => "windows-hello",
+        crate::accounts::Keystore::OnePassword => "1password",
+        crate::accounts::Keystore::File => "file",
+        crate::accounts::Keystore::Ephemeral => "ephemeral",
+    }
 }
 
 #[cfg(test)]

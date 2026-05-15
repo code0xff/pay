@@ -241,14 +241,85 @@ impl Keystore {
     pub fn auth_available(&self) -> bool {
         self.auth.is_available()
     }
+
+    // ── EVM (secp256k1) variants ────────────────────────────────────────
+    //
+    // EVM accounts persist only the 32-byte secp256k1 private key under a
+    // separate `evm-key:` prefix (the address is derivable from the key). The
+    // ed25519 / Solana path is untouched and keys under the two prefixes
+    // coexist freely under the same account name.
+
+    /// Import a 32-byte secp256k1 private key under `evm-key:<account>`.
+    pub fn import_evm_key(&self, account: &str, privkey_bytes: &[u8]) -> Result<()> {
+        self.import_evm_key_with_intent(
+            account,
+            privkey_bytes,
+            &AuthIntent::create_account(account),
+        )
+    }
+
+    /// Import a 32-byte secp256k1 private key with a typed auth intent.
+    pub fn import_evm_key_with_intent(
+        &self,
+        account: &str,
+        privkey_bytes: &[u8],
+        intent: &AuthIntent,
+    ) -> Result<()> {
+        validate_account_name(account)?;
+        validate_evm_privkey(privkey_bytes)?;
+
+        if self.auth_on_write {
+            self.auth.authenticate(intent)?;
+        }
+        self.store.store(&evm_key_key(account), privkey_bytes)
+    }
+
+    /// Load the 32-byte secp256k1 private key. Triggers an auth prompt.
+    pub fn load_evm_key(&self, account: &str, reason: &str) -> Result<Zeroizing<Vec<u8>>> {
+        self.load_evm_key_with_intent(account, &AuthIntent::from_reason(reason))
+    }
+
+    /// Load the 32-byte secp256k1 private key with a typed auth intent.
+    pub fn load_evm_key_with_intent(
+        &self,
+        account: &str,
+        intent: &AuthIntent,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        validate_account_name(account)?;
+        self.auth.authenticate(intent)?;
+        let bytes = self.store.load(&evm_key_key(account))?;
+        validate_evm_privkey(&bytes)?;
+        Ok(bytes)
+    }
+
+    /// Delete the EVM private key for `account`. `reason` is the OS auth prompt label.
+    pub fn delete_evm_key(&self, account: &str, reason: &str) -> Result<()> {
+        self.delete_evm_key_with_intent(account, &AuthIntent::from_reason(reason))
+    }
+
+    /// Delete the EVM private key with a typed auth intent.
+    pub fn delete_evm_key_with_intent(&self, account: &str, intent: &AuthIntent) -> Result<()> {
+        validate_account_name(account)?;
+        if self.auth_on_write {
+            self.auth.authenticate(intent)?;
+        }
+        self.store.delete(&evm_key_key(account))
+    }
+
+    /// True when an EVM private key is stored under this account.
+    pub fn evm_key_exists(&self, account: &str) -> bool {
+        validate_account_name(account).is_ok() && self.store.exists(&evm_key_key(account))
+    }
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
 const KEYPAIR_LEN: usize = 64;
 const PUBKEY_LEN: usize = 32;
+const EVM_PRIVKEY_LEN: usize = 32;
 const KEYPAIR_KEY_PREFIX: &str = "keypair:";
 const PUBKEY_KEY_PREFIX: &str = "pubkey:";
+const EVM_KEY_PREFIX: &str = "evm-key:";
 const RESERVED_PUBKEY_SUFFIX: &str = ".pubkey";
 
 fn validate_account_name(name: &str) -> Result<()> {
@@ -295,6 +366,20 @@ fn validate_pubkey(bytes: &[u8]) -> Result<()> {
 
 fn keypair_key(account: &str) -> String {
     format!("{KEYPAIR_KEY_PREFIX}{account}")
+}
+
+fn evm_key_key(account: &str) -> String {
+    format!("{EVM_KEY_PREFIX}{account}")
+}
+
+fn validate_evm_privkey(bytes: &[u8]) -> Result<()> {
+    if bytes.len() != EVM_PRIVKEY_LEN {
+        return Err(Error::InvalidKeypair(format!(
+            "expected {EVM_PRIVKEY_LEN} bytes for secp256k1 private key, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(())
 }
 
 fn pubkey_key(account: &str) -> String {
@@ -688,5 +773,75 @@ mod tests {
         assert!(!ks.exists("alice"));
         assert!(ks.pubkey("alice").is_err());
         assert!(ks.load_keypair("alice", "test").is_err());
+    }
+
+    // ── EVM (secp256k1) variants ────────────────────────────────────────
+
+    fn test_evm_privkey() -> [u8; 32] {
+        let mut k = [0u8; 32];
+        for (i, b) in k.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_add(7);
+        }
+        k
+    }
+
+    #[test]
+    fn evm_key_import_load_roundtrip() {
+        let ks = Keystore::in_memory();
+        let priv_bytes = test_evm_privkey();
+        ks.import_evm_key("evm-alice", &priv_bytes).unwrap();
+        assert!(ks.evm_key_exists("evm-alice"));
+        let loaded = ks.load_evm_key("evm-alice", "test").unwrap();
+        assert_eq!(&loaded[..], &priv_bytes[..]);
+    }
+
+    #[test]
+    fn evm_key_rejects_wrong_length() {
+        let ks = Keystore::in_memory();
+        let too_short = [1u8; 16];
+        let err = ks.import_evm_key("a", &too_short).unwrap_err();
+        assert!(
+            err.to_string().contains("expected 32 bytes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn evm_key_delete_removes_only_evm_entry() {
+        let ks = Keystore::in_memory();
+        let priv_bytes = test_evm_privkey();
+        ks.import_evm_key("alice", &priv_bytes).unwrap();
+        assert!(ks.evm_key_exists("alice"));
+        ks.delete_evm_key("alice", "test").unwrap();
+        assert!(!ks.evm_key_exists("alice"));
+        assert!(ks.load_evm_key("alice", "test").is_err());
+    }
+
+    #[test]
+    fn ed25519_and_evm_keys_coexist_under_same_account_name() {
+        // Same account name, different prefixes — both keys should survive
+        // independent imports and deletes.
+        let ks = Keystore::in_memory();
+        let ed = test_keypair();
+        let evm = test_evm_privkey();
+        ks.import("alice", &ed, SyncMode::ThisDeviceOnly).unwrap();
+        ks.import_evm_key("alice", &evm).unwrap();
+
+        let ed_loaded = ks.load_keypair("alice", "test").unwrap();
+        let evm_loaded = ks.load_evm_key("alice", "test").unwrap();
+        assert_eq!(&ed_loaded[..], &ed[..]);
+        assert_eq!(&evm_loaded[..], &evm[..]);
+
+        // Deleting the ed25519 keypair must not touch the EVM key.
+        ks.delete("alice", "test").unwrap();
+        assert!(!ks.exists("alice"));
+        assert!(ks.evm_key_exists("alice"));
+    }
+
+    #[test]
+    fn evm_key_exists_rejects_invalid_account_names() {
+        let ks = Keystore::in_memory();
+        assert!(!ks.evm_key_exists(""));
+        assert!(!ks.evm_key_exists("bad name with spaces"));
     }
 }
