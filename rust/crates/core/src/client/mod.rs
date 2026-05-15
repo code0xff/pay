@@ -1,6 +1,8 @@
 pub mod balance;
 #[cfg(feature = "evm")]
 pub mod evm;
+#[cfg(feature = "evm")]
+pub mod evm_token_meta;
 pub mod fetch;
 pub mod mpp;
 pub(crate) mod prompt;

@@ -40,10 +40,39 @@ use crate::PaymentState;
 use crate::accounts::is_evm_network_family;
 use crate::chain::ChainFamily;
 use crate::client::balance::{evm_stablecoin_address, evm_stablecoin_decimals};
+use crate::client::evm_token_meta::{self, EvmTokenMeta};
 use crate::server::in_flight::{InFlight, NonceKey};
 use crate::server::metering::{self, RequestProperties};
 use crate::server::telemetry;
 use crate::server::x402_facilitator::FacilitatorClient;
+
+/// Typed representation of an EVM x402 `PaymentRequirements` entry (Phase 13-2).
+///
+/// Using a typed struct instead of `serde_json::json!` prevents field-name
+/// drift when `x402-chain-eip155` evolves and makes camelCase serialization
+/// explicit via `#[serde(rename_all = "camelCase")]`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvmPaymentRequirements {
+    scheme: &'static str,
+    network: String,
+    asset: String,
+    pay_to: String,
+    amount: String,
+    currency: String,
+    decimals: u32,
+    resource: String,
+    description: String,
+    max_amount_required: String,
+    max_timeout_seconds: u32,
+    extra: EvmExtra,
+}
+
+#[derive(serde::Serialize)]
+struct EvmExtra {
+    name: String,
+    version: String,
+}
 
 pub async fn evm_x402_payment_middleware<S: PaymentState>(
     axum::extract::State(state): axum::extract::State<S>,
@@ -173,18 +202,23 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
         }
     };
 
-    let currency_symbol = pick_currency_symbol(operator);
-    let requirements = match build_evm_requirements(
-        network_slug,
-        recipient,
-        &currency_symbol,
-        amount_usd,
-        &uri,
-        endpoint.and_then(|ep| ep.description.as_deref()),
-    ) {
-        Ok(r) => r,
-        Err(e) => return internal_error(&e),
-    };
+    // Phase 13-4: advertise all configured currencies in the accepts array.
+    // build_evm_requirements is now async (fetches decimals + EIP-712 domain
+    // on-chain on first call; subsequent calls read from cache).
+    let currency_symbols = pick_currency_symbols(operator);
+    let description = endpoint.and_then(|ep| ep.description.as_deref());
+    let mut accepts: Vec<serde_json::Value> = Vec::with_capacity(currency_symbols.len());
+    for sym in &currency_symbols {
+        match build_evm_requirements(rpc_url, network_slug, recipient, sym, amount_usd, &uri, description).await {
+            Ok(req) => accepts.push(req),
+            Err(e) => tracing::warn!(symbol = %sym, error = %e, "Skipping currency symbol in accepts"),
+        }
+    }
+    if accepts.is_empty() {
+        return internal_error("No valid currencies configured for this EVM network");
+    }
+    let primary_requirements = accepts[0].clone();
+    let primary_symbol = &currency_symbols[0];
 
     let payment_header = headers
         .get(PAYMENT_SIGNATURE_HEADER)
@@ -194,11 +228,11 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
 
     match payment_header {
         None => challenge_response(
-            &requirements,
+            &accepts,
             &method,
             &path,
             subdomain,
-            &currency_symbol,
+            primary_symbol,
             amount_usd,
         ),
         Some(header) => {
@@ -207,7 +241,7 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
                 rpc_url,
                 in_flight,
                 header,
-                requirements,
+                primary_requirements,
                 subdomain,
                 &path,
                 req,
@@ -219,7 +253,7 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
 }
 
 fn challenge_response(
-    requirements: &serde_json::Value,
+    accepts: &[serde_json::Value],
     method: &Method,
     path: &str,
     subdomain: &str,
@@ -228,7 +262,7 @@ fn challenge_response(
 ) -> Response {
     let envelope = json!({
         "x402Version": 2,
-        "accepts": [requirements],
+        "accepts": accepts,
         "resource": null,
     });
     let header_value = match serde_json::to_string(&envelope) {
@@ -461,15 +495,28 @@ fn decode_payment_payload(header: &str) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("JSON decode failed: {e}"))
 }
 
-fn pick_currency_symbol(operator: &pay_types::metering::OperatorConfig) -> String {
-    operator
+fn pick_currency_symbols(operator: &pay_types::metering::OperatorConfig) -> Vec<String> {
+    let list = operator
         .currencies
         .get("usd")
-        .and_then(|list| list.first().cloned())
-        .unwrap_or_else(|| "USDC".to_string())
+        .cloned()
+        .unwrap_or_default();
+    if list.is_empty() {
+        vec!["USDC".to_string()]
+    } else {
+        list
+    }
 }
 
-fn build_evm_requirements(
+/// Build a single `PaymentRequirements` JSON object for one currency symbol.
+///
+/// Phase 13-1+3: now async so it can call `fetch_token_meta` which issues
+/// `decimals()` and `eip712Domain()` view calls on first invocation and reads
+/// from an in-process cache on subsequent ones.  If the RPC call fails the
+/// function falls back to static values (symbol-based decimals +
+/// `static_fallback_domain`) so the gateway can still respond on RPC hiccups.
+async fn build_evm_requirements(
+    rpc_url: &str,
     network_slug: &str,
     recipient: &str,
     currency_symbol: &str,
@@ -484,18 +531,47 @@ fn build_evm_requirements(
     let asset = evm_stablecoin_address(network_slug, currency_symbol).ok_or_else(|| {
         format!("No known ERC-20 deployment for {currency_symbol} on {network_slug}")
     })?;
-    let decimals = evm_stablecoin_decimals(currency_symbol).ok_or_else(|| {
-        format!("Unknown decimal places for stablecoin `{currency_symbol}` — \
-                 add it to evm_stablecoin_decimals")
-    })? as u32;
-    // Validate the price before scaling: `as u128` on an f64 saturates
-    // (NaN→0, negative→0, oversize→u128::MAX), which silently emits free /
-    // outrageously-priced envelopes. Reject those at the source.
+    // Validate price before fetching metadata — avoids a pointless RPC call
+    // for obviously invalid inputs (NaN, negative, overflow).
     if !amount_usd.is_finite() || amount_usd < 0.0 {
         return Err(format!(
             "Invalid EVM x402 price `{amount_usd}` (must be a finite non-negative number)"
         ));
     }
+
+    // Phase 13-1+3: fetch decimals and EIP-712 domain from the token contract.
+    // Falls back to static table when the RPC URL is unavailable or the token
+    // does not implement EIP-5267 — the fallback values mirror what
+    // `x402-chain-eip155` ships for USDC so the facilitator accepts the envelope.
+    let token: alloy::primitives::Address = asset
+        .parse()
+        .map_err(|e| format!("token address `{asset}` parse failed: {e}"))?;
+    let meta: EvmTokenMeta = match evm_token_meta::fetch_token_meta(
+        rpc_url, chain_id, token, Some(currency_symbol),
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                network = %network_slug,
+                currency = %currency_symbol,
+                "fetch_token_meta failed — using static fallback for envelope"
+            );
+            EvmTokenMeta {
+                decimals: evm_stablecoin_decimals(currency_symbol).ok_or_else(|| {
+                    format!(
+                        "Unknown stablecoin `{currency_symbol}` and on-chain decimals() \
+                         call failed — cannot build envelope"
+                    )
+                })?,
+                eip712_domain: evm_token_meta::static_fallback_domain(chain_id),
+            }
+        }
+    };
+
+    let decimals = meta.decimals as u32;
     let scaled = amount_usd * 10f64.powi(decimals as i32);
     if scaled > (u64::MAX as f64) {
         return Err(format!(
@@ -503,38 +579,26 @@ fn build_evm_requirements(
         ));
     }
     let raw_amount = scaled.round() as u128;
-    let (token_name, token_version) = usdc_eip712_domain(network_slug);
 
-    Ok(json!({
-        "scheme": "exact",
-        "network": format!("eip155:{chain_id}"),
-        "asset": asset,
-        "payTo": recipient,
-        "amount": raw_amount.to_string(),
-        "currency": asset,
-        "decimals": decimals,
-        "resource": uri.to_string(),
-        "description": description.unwrap_or(""),
-        "maxAmountRequired": raw_amount.to_string(),
-        "maxTimeoutSeconds": 300,
-        "extra": {
-            "name": token_name,
-            "version": token_version,
-        }
-    }))
-}
-
-/// EIP-712 domain hint per (chain, USDC) deployment. Mirrors the values
-/// `x402-chain-eip155` ships under `KnownNetworkEip155 for USDC` so the
-/// facilitator's signature check accepts our envelope.
-fn usdc_eip712_domain(network_slug: &str) -> (&'static str, &'static str) {
-    match network_slug {
-        // Ethereum mainnet & most L2s use the long form name.
-        "ethereum" | "base" | "optimism" | "arbitrum" => ("USD Coin", "2"),
-        // Sepolia/Holesky/Base-Sepolia testnets use the short form.
-        "sepolia" | "holesky" | "base-sepolia" => ("USDC", "2"),
-        _ => ("USDC", "2"),
-    }
+    // Phase 13-2: typed struct serialization instead of ad-hoc json! macro.
+    let req = EvmPaymentRequirements {
+        scheme: "exact",
+        network: format!("eip155:{chain_id}"),
+        asset: asset.to_string(),
+        pay_to: recipient.to_string(),
+        amount: raw_amount.to_string(),
+        currency: asset.to_string(),
+        decimals,
+        resource: uri.to_string(),
+        description: description.unwrap_or("").to_string(),
+        max_amount_required: raw_amount.to_string(),
+        max_timeout_seconds: 300,
+        extra: EvmExtra {
+            name: meta.eip712_domain.name,
+            version: meta.eip712_domain.version,
+        },
+    };
+    serde_json::to_value(&req).map_err(|e| format!("requirements serialize failed: {e}"))
 }
 
 /// Subset of `requirements` we re-check against the on-chain receipt.
@@ -775,10 +839,14 @@ fn verification_failed_response(message: &str) -> Response {
 mod tests {
     use super::*;
 
-    #[test]
-    fn build_evm_requirements_for_sepolia_usdc() {
+    // rpc_url="" causes fetch_token_meta to fail URL parse → falls back to
+    // static decimals + static_fallback_domain, which is what these tests assert.
+
+    #[tokio::test]
+    async fn build_evm_requirements_for_sepolia_usdc() {
         let uri: axum::http::Uri = "/v1/test".parse().unwrap();
         let req = build_evm_requirements(
+            "",
             "sepolia",
             "0xabc0000000000000000000000000000000000001",
             "USDC",
@@ -786,6 +854,7 @@ mod tests {
             &uri,
             Some("desc"),
         )
+        .await
         .unwrap();
         assert_eq!(req["scheme"], "exact");
         assert_eq!(req["network"], "eip155:11155111");
@@ -796,10 +865,11 @@ mod tests {
         assert_eq!(req["extra"]["version"], "2");
     }
 
-    #[test]
-    fn build_evm_requirements_for_base_uses_long_name() {
+    #[tokio::test]
+    async fn build_evm_requirements_for_base_uses_long_name() {
         let uri: axum::http::Uri = "/v1/test".parse().unwrap();
         let req = build_evm_requirements(
+            "",
             "base",
             "0xabc0000000000000000000000000000000000001",
             "USDC",
@@ -807,86 +877,76 @@ mod tests {
             &uri,
             None,
         )
+        .await
         .unwrap();
         assert_eq!(req["network"], "eip155:8453");
         assert_eq!(req["extra"]["name"], "USD Coin");
         assert_eq!(req["amount"], "1000000");
     }
 
-    #[test]
-    fn build_evm_requirements_rejects_non_evm() {
+    #[tokio::test]
+    async fn build_evm_requirements_rejects_non_evm() {
         let uri: axum::http::Uri = "/v1/test".parse().unwrap();
-        let err = build_evm_requirements(
-            "mainnet",
-            "ABC",
-            "USDC",
-            1.0,
-            &uri,
-            None,
-        )
-        .unwrap_err();
+        let err = build_evm_requirements("", "mainnet", "ABC", "USDC", 1.0, &uri, None)
+            .await
+            .unwrap_err();
         assert!(err.contains("not an EVM network"));
     }
 
-    #[test]
-    fn build_evm_requirements_rejects_unknown_currency() {
+    #[tokio::test]
+    async fn build_evm_requirements_rejects_unknown_currency() {
         let uri: axum::http::Uri = "/v1/test".parse().unwrap();
-        let err = build_evm_requirements(
-            "sepolia",
-            "0xabc",
-            "DOGE",
-            1.0,
-            &uri,
-            None,
-        )
-        .unwrap_err();
+        let err = build_evm_requirements("", "sepolia", "0xabc", "DOGE", 1.0, &uri, None)
+            .await
+            .unwrap_err();
         assert!(err.contains("No known ERC-20 deployment"));
     }
 
-    #[test]
-    fn build_evm_requirements_rejects_nan_price() {
+    #[tokio::test]
+    async fn build_evm_requirements_rejects_nan_price() {
         let uri: axum::http::Uri = "/v1/test".parse().unwrap();
-        let err = build_evm_requirements(
-            "sepolia",
-            "0xabc",
-            "USDC",
-            f64::NAN,
-            &uri,
-            None,
-        )
-        .unwrap_err();
+        let err = build_evm_requirements("", "sepolia", "0xabc", "USDC", f64::NAN, &uri, None)
+            .await
+            .unwrap_err();
         assert!(err.contains("finite"));
     }
 
-    #[test]
-    fn build_evm_requirements_rejects_negative_price() {
+    #[tokio::test]
+    async fn build_evm_requirements_rejects_negative_price() {
         let uri: axum::http::Uri = "/v1/test".parse().unwrap();
-        let err = build_evm_requirements(
-            "sepolia",
-            "0xabc",
-            "USDC",
-            -1.0,
-            &uri,
-            None,
-        )
-        .unwrap_err();
+        let err = build_evm_requirements("", "sepolia", "0xabc", "USDC", -1.0, &uri, None)
+            .await
+            .unwrap_err();
         assert!(err.contains("non-negative"));
     }
 
-    #[test]
-    fn build_evm_requirements_rejects_oversize_price() {
+    #[tokio::test]
+    async fn build_evm_requirements_rejects_oversize_price() {
         let uri: axum::http::Uri = "/v1/test".parse().unwrap();
         // 1e30 USD × 10^6 base units > u64::MAX (~1.8e19).
-        let err = build_evm_requirements(
-            "sepolia",
-            "0xabc",
-            "USDC",
-            1e30,
-            &uri,
-            None,
-        )
-        .unwrap_err();
+        let err = build_evm_requirements("", "sepolia", "0xabc", "USDC", 1e30, &uri, None)
+            .await
+            .unwrap_err();
         assert!(err.contains("u64 base-unit ceiling"));
+    }
+
+    #[test]
+    fn pick_currency_symbols_returns_configured_list() {
+        let op: pay_types::metering::OperatorConfig =
+            serde_json::from_value(serde_json::json!({
+                "currencies": { "usd": ["USDC", "USDT"] }
+            }))
+            .unwrap();
+        let syms = pick_currency_symbols(&op);
+        assert_eq!(syms, vec!["USDC", "USDT"]);
+    }
+
+    #[test]
+    fn pick_currency_symbols_defaults_to_usdc() {
+        let op: pay_types::metering::OperatorConfig =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let syms = pick_currency_symbols(&op);
+        assert_eq!(syms, vec!["USDC"]);
     }
 
     #[test]

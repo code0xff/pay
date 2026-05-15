@@ -68,6 +68,24 @@ pub fn build_evm_payment(
     })
 }
 
+/// Pick the best candidate from what `V2Eip155ExactClient::accept` returned.
+///
+/// Phase 13-6: makes candidate selection an explicit, named step instead of
+/// an inline `.next()`. Currently selects the first candidate (the SDK
+/// already scores and orders them), leaving a clear hook for future
+/// preferred-symbol or balance-based selection without touching the call site.
+fn pick_best_candidate<C>(
+    candidates: impl IntoIterator<Item = C>,
+    network: &str,
+) -> std::result::Result<C, Box<dyn std::error::Error + Send + Sync>> {
+    candidates.into_iter().next().ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+        Box::from(format!(
+            "x402-chain-eip155 produced no candidate for network `{network}` \
+             (requirements may have an unsupported `extra` shape)"
+        ))
+    })
+}
+
 /// Drive `V2Eip155ExactClient` with a single-entry `PaymentRequired::V2`
 /// envelope built from the chosen requirements, then sign the first
 /// candidate it accepts. The b64-encoded payload is the
@@ -88,12 +106,7 @@ async fn sign_evm_payment(
 
     let client = V2Eip155ExactClient::new(signer.signer.clone());
     let candidates = client.accept(&payment_required);
-    let candidate = candidates.into_iter().next().ok_or_else(|| {
-        format!(
-            "x402-chain-eip155 produced no candidate for network `{}` (requirements may have an unsupported `extra` shape)",
-            requirements.network
-        )
-    })?;
+    let candidate = pick_best_candidate(candidates, &requirements.network)?;
 
     Ok(candidate.sign().await?)
 }
