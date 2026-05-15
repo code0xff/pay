@@ -202,8 +202,30 @@ match x402.verify_payment_signature(&payment_header).await {
 }
 ```
 
-### EVM 미지원
-이번 Phase는 Solana x402만 대상. EVM x402 서버 지원은 Phase 3(클라이언트 EVM 멀티체인)이 완료된 이후 별도 검토.
+### EVM 지원 (Option B: 외부 facilitator 위임)
+구현 후 추가된 트랙. EVM x402 서버는 별도 신호 흐름을 갖는다:
+
+1. YAML 토글:
+   ```yaml
+   operator:
+     protocol: x402
+     network: sepolia               # eip155:* 슬러그
+     recipient: "0x…"               # 운영자 EOA (gas 미부담)
+     facilitator_url: "https://facilitator.x402.org"
+   ```
+
+2. `is_evm_x402_spec()`가 위 조건을 감지하면 `start.rs`가 슬림 EVM 런타임
+   (`commands/server/evm_x402_start.rs`)로 위임한다. Solana 코드 경로는 절대
+   거치지 않으므로 ETH 가스나 secp256k1 키스토어가 필요없다.
+
+3. EVM 미들웨어(`server/evm_x402_payment.rs`)는:
+   - 402 응답에 `payment-required` 헤더로 EIP-712-shaped envelope 첨부
+   - 클라이언트가 `payment-signature`를 보내면 `FacilitatorClient`
+     (`server/x402_facilitator.rs`)가 `/verify` + `/settle`로 forward
+   - facilitator가 ETH 가스로 `transferWithAuthorization` 정산하고 tx hash 반환
+
+4. Cargo 게이팅: `--features evm` 없이 EVM 스펙을 띄우면 `start.rs`가
+   "Rebuild with --features evm" 에러를 즉시 반환한다.
 
 ---
 

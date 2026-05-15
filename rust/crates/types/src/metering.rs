@@ -579,6 +579,22 @@ pub struct OperatorConfig {
     /// Whether the operator sponsors transaction fees.
     #[serde(default)]
     pub fee_payer: bool,
+    /// Wire protocol the gateway speaks for this API. Defaults to MPP so
+    /// existing YAML specs continue to work unchanged. Set to `x402` to
+    /// switch the middleware over to Solana x402 (Coinbase `x-payment` /
+    /// `x-payment-required` headers).
+    #[serde(default)]
+    pub protocol: PaymentProtocol,
+    /// External x402 facilitator HTTP base URL (e.g.
+    /// `https://facilitator.x402.org`). Only consulted when `protocol: x402`
+    /// AND `network` is an EVM slug — Solana x402 verifies inside the SDK and
+    /// does not delegate to a facilitator. When set, the middleware POSTs
+    /// `{paymentPayload, paymentRequirements}` to `<url>/verify` and
+    /// `<url>/settle` on each paid request. Required for EVM x402 (the
+    /// gateway has no ETH wallet to settle on-chain itself); ignored on
+    /// Solana.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facilitator_url: Option<String>,
 }
 
 /// Signing backend configuration.
@@ -1016,10 +1032,11 @@ pub enum SkuLevel {
 // Payment protocols (x402 / MPP)
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentProtocol {
     X402,
+    #[default]
     Mpp,
 }
 

@@ -13265,6 +13265,7 @@ dependencies = [
  "solana-transaction",
  "solana-transaction-status",
  "thiserror 2.0.18",
+ "tokio",
  "url 2.5.8",
 ]
 

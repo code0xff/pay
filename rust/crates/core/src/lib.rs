@@ -41,7 +41,11 @@ use pay_types::metering::ApiSpec;
 #[cfg(feature = "server")]
 pub use solana_mpp;
 #[cfg(feature = "server")]
+pub use solana_x402;
+#[cfg(feature = "server")]
 use solana_mpp::server::Mpp;
+#[cfg(feature = "server")]
+use solana_x402::server::X402;
 
 /// Trait that the application state must implement for the payment middleware.
 #[cfg(feature = "server")]
@@ -50,6 +54,19 @@ pub trait PaymentState: Clone + Send + Sync + 'static {
     fn mpp(&self) -> Option<&Mpp>;
     fn mpps(&self) -> Vec<&Mpp> {
         self.mpp().into_iter().collect()
+    }
+    /// x402 server instances for this gateway, one per accepted currency.
+    /// Returned in the same order as `mpps()` for consistency. The default
+    /// implementation returns an empty list so existing MPP-only callers
+    /// don't need to be updated.
+    fn x402s(&self) -> Vec<&X402> {
+        Vec::new()
+    }
+    /// External x402 facilitator the gateway delegates EVM verify+settle to.
+    /// `None` for Solana-only gateways (Solana x402 settles via the in-process
+    /// SDK and never touches a facilitator).
+    fn facilitator(&self) -> Option<&server::x402_facilitator::FacilitatorClient> {
+        None
     }
     fn browser_rpc_url(&self) -> Option<&str> {
         None

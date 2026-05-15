@@ -12,7 +12,9 @@ use pay_core::accounts::AccountsStore;
 use pay_core::server::session::SessionMpp;
 use pay_core::server::telemetry::FeePayerWallet;
 use pay_types::Stablecoin;
-use pay_types::metering::{ApiSpec, OperatorConfig, RoutingConfig, SignerConfig};
+use pay_types::metering::{ApiSpec, OperatorConfig, PaymentProtocol, RoutingConfig, SignerConfig};
+use pay_core::solana_x402;
+use pay_core::solana_x402::server::X402;
 use solana_mpp::server::Mpp;
 use solana_mpp::solana_keychain::SolanaSigner;
 use solana_mpp::solana_keychain::memory::MemorySigner;
@@ -88,6 +90,7 @@ pub struct StartCommand {
 struct AppState {
     apis: Arc<Vec<ApiSpec>>,
     mpps: Vec<Mpp>,
+    x402s: Vec<X402>,
     session_mpp: Option<Arc<SessionMpp>>,
     browser_rpc_url: Option<String>,
     fee_payer_wallet: Option<FeePayerWallet>,
@@ -102,6 +105,9 @@ impl PaymentState for AppState {
     }
     fn mpps(&self) -> Vec<&Mpp> {
         self.mpps.iter().collect()
+    }
+    fn x402s(&self) -> Vec<&X402> {
+        self.x402s.iter().collect()
     }
     fn browser_rpc_url(&self) -> Option<&str> {
         self.browser_rpc_url.as_deref()
@@ -122,6 +128,21 @@ fn should_use_auto_fee_payer_signer(
     sandbox || (signer_cfg.is_none() && network.is_throwaway())
 }
 
+/// True when this spec's operator block selects `protocol: x402` on an EVM
+/// network slug — the trigger for the slim EVM runtime that delegates
+/// verify+settle to an external facilitator.
+fn is_evm_x402_spec(api: &ApiSpec) -> bool {
+    let Some(op) = api.operator.as_ref() else {
+        return false;
+    };
+    if op.protocol != PaymentProtocol::X402 {
+        return false;
+    }
+    op.network
+        .as_deref()
+        .is_some_and(pay_core::accounts::is_evm_network_family)
+}
+
 impl StartCommand {
     pub fn run(self, active_account_name: Option<&str>, sandbox: bool) -> pay_core::Result<()> {
         let debugger = self.debugger || sandbox;
@@ -131,6 +152,22 @@ impl StartCommand {
 
         let api: ApiSpec = serde_yml::from_str(&contents)
             .map_err(|e| pay_core::Error::Config(format!("Invalid spec: {e}")))?;
+
+        // EVM x402 has wholly different setup needs (no Solana RPC, no Solana
+        // keypair, settlement via external facilitator) — dispatch to the
+        // slim EVM runtime before any Solana-specific scaffolding runs.
+        if is_evm_x402_spec(&api) {
+            #[cfg(feature = "evm")]
+            {
+                return super::evm_x402_start::run(&self.bind, api);
+            }
+            #[cfg(not(feature = "evm"))]
+            {
+                return Err(pay_core::Error::Config(
+                    "This spec selects `protocol: x402` on an EVM network, but the binary was built without the `evm` feature. Rebuild with `cargo build --features evm`.".to_string(),
+                ));
+            }
+        }
 
         // Optional OpenAPI / Discovery doc — loaded once, filtered to the
         // YAML's `endpoints[]` allow-list, and exposed at `GET /openapi.json`
@@ -398,6 +435,36 @@ impl StartCommand {
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| pay_core::Error::Config(format!("Failed to create MPP server: {e}")))?;
+
+            // ── Create x402 servers (one per currency) when the operator
+            // YAML selects `protocol: x402`. The Vec stays empty for MPP
+            // specs so the unused capacity costs nothing on the hot path.
+            let operator_protocol = api
+                .operator
+                .as_ref()
+                .map(|op| op.protocol)
+                .unwrap_or_default();
+            let x402s: Vec<X402> = if operator_protocol == PaymentProtocol::X402 {
+                currency_configs
+                    .iter()
+                    .map(|(_, mpp_currency, decimals)| {
+                        X402::new(solana_x402::server::Config {
+                            recipient: recipient.clone(),
+                            currency: mpp_currency.clone(),
+                            decimals: *decimals,
+                            network: network.slug().to_string(),
+                            rpc_url: Some(rpc_url.clone()),
+                            ..Default::default()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        pay_core::Error::Config(format!("Failed to create x402 server: {e}"))
+                    })?
+            } else {
+                Vec::new()
+            };
+
             let (_session_currency, session_mpp_currency, session_decimals) =
                 currency_configs.first().cloned().ok_or_else(|| {
                     pay_core::Error::Config(
@@ -766,6 +833,7 @@ impl StartCommand {
             let state = AppState {
                 apis: Arc::new(vec![api.clone()]),
                 mpps,
+                x402s,
                 session_mpp,
                 browser_rpc_url: Some(BROWSER_RPC_PROXY_PATH.to_string()),
                 fee_payer_wallet,
@@ -871,12 +939,28 @@ impl StartCommand {
                         .await
                         .unwrap_or_else(|e| e)
                     }
-                }))
-                .layer(middleware::from_fn_with_state(
-                    state.clone(),
-                    pay_core::server::payment::payment_middleware::<AppState>,
-                ))
-                .with_state(state)
+                }));
+            // `from_fn_with_state` is parameterized by the function pointer
+            // type, so the MPP and x402 middleware layers monomorphize to
+            // distinct `FromFnLayer<...>` types and cannot share a single
+            // `match` arm. Split the wiring into two branches and route on
+            // the operator's chosen protocol; the branches re-converge on
+            // `with_state(...)`'s `Router<()>` output.
+            let app = match operator_protocol {
+                PaymentProtocol::X402 => app
+                    .layer(middleware::from_fn_with_state(
+                        state.clone(),
+                        pay_core::server::x402_payment::x402_payment_middleware::<AppState>,
+                    ))
+                    .with_state(state),
+                PaymentProtocol::Mpp => app
+                    .layer(middleware::from_fn_with_state(
+                        state.clone(),
+                        pay_core::server::payment::payment_middleware::<AppState>,
+                    ))
+                    .with_state(state),
+            };
+            let app = app
                 // Logging layer (outermost — executes first).
                 // Extension must be added AFTER the middleware layer (LIFO order)
                 // so the extension is available when the middleware runs.

@@ -407,7 +407,7 @@ async fn rpc_call(
 // slug, since the RPC URL alone is not enough to distinguish chain families.
 
 #[cfg(feature = "evm")]
-pub use evm_balances::{evm_default_rpc_url, evm_rpc_url, get_evm_balances};
+pub use evm_balances::{evm_default_rpc_url, evm_rpc_url, evm_stablecoin_address, get_evm_balances};
 
 #[cfg(feature = "evm")]
 mod evm_balances {
@@ -448,7 +448,7 @@ mod evm_balances {
     /// Well-known ERC-20 stablecoin contract addresses per network.
     /// Returns `None` when we don't track the (network, symbol) pair — caller
     /// silently skips it rather than guessing at an address.
-    pub(super) fn evm_stablecoin_address(network: &str, symbol: &str) -> Option<&'static str> {
+    pub fn evm_stablecoin_address(network: &str, symbol: &str) -> Option<&'static str> {
         match (network, symbol) {
             ("ethereum", "USDC") => Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
             ("ethereum", "USDT") => Some("0xdAC17F958D2ee523a2206206994597C13D831ec7"),

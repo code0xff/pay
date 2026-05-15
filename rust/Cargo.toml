@@ -110,6 +110,7 @@ solana-mpp = { git = "https://github.com/solana-foundation/mpp-sdk", branch = "m
 # Solana x402
 solana-x402 = { git = "https://github.com/solana-foundation/x402-sdk", branch = "main", package = "solana-x402", default-features = false, features = [
     "client",
+    "server",
 ] }
 
 # Solana primitives (pinned to versions used by solana-mpp)
