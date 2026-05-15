@@ -10,8 +10,11 @@ pub struct ImportCommand {
     /// Account name (required).
     pub name: String,
 
-    /// Path to the JSON key file.
-    pub file: String,
+    /// Path to the JSON key file (Solana, 64-byte array format). Required
+    /// for `--chain-family solana` (the default); ignored for EVM imports
+    /// which read the key from `--secret-key-hex`.
+    #[arg(value_name = "FILE")]
+    pub file: Option<String>,
 
     /// Storage backend: "keychain", "gnome-keyring", or "windows-hello".
     #[arg(long)]
@@ -20,16 +23,52 @@ pub struct ImportCommand {
     /// Legacy vault name.
     #[arg(long, hide = true)]
     pub vault: Option<String>,
+
+    /// Chain family: `solana` (default) or `evm`.
+    #[arg(long, value_name = "FAMILY")]
+    pub chain_family: Option<String>,
+
+    /// EVM network slug for `--chain-family evm` (e.g. `sepolia`, `base`).
+    #[arg(long, value_name = "SLUG")]
+    pub network: Option<String>,
+
+    /// 32-byte secp256k1 private key as hex, with or without `0x` prefix.
+    /// Required for `--chain-family evm`. The derived EIP-55 address is
+    /// shown for confirmation before the key is sealed into the keystore.
+    #[arg(long, value_name = "HEX")]
+    pub secret_key_hex: Option<String>,
 }
 
 impl ImportCommand {
     pub fn run(self) -> pay_core::Result<()> {
+        if self.chain_family.as_deref() == Some("evm") {
+            #[cfg(feature = "evm")]
+            {
+                return self.run_evm();
+            }
+            #[cfg(not(feature = "evm"))]
+            {
+                return Err(pay_core::Error::Config(
+                    "EVM imports require the `evm` Cargo feature. Rebuild with \
+                     `cargo build -p pay --features evm`."
+                        .to_string(),
+                ));
+            }
+        }
+
         let theme = ColorfulTheme::default();
+        let file_path = self.file.as_deref().ok_or_else(|| {
+            pay_core::Error::Config(
+                "`pay account import` needs a JSON keypair file for Solana \
+                 (or `--chain-family evm --secret-key-hex 0x...` for EVM)."
+                    .to_string(),
+            )
+        })?;
 
         // 1. Read and validate keypair
-        let expanded = shellexpand::tilde(&self.file);
+        let expanded = shellexpand::tilde(file_path);
         let data = std::fs::read_to_string(expanded.as_ref())
-            .map_err(|e| pay_core::Error::Config(format!("Failed to read {}: {e}", self.file)))?;
+            .map_err(|e| pay_core::Error::Config(format!("Failed to read {file_path}: {e}")))?;
         let keypair_bytes: Vec<u8> = serde_json::from_str(&data)
             .map_err(|e| pay_core::Error::Config(format!("Invalid keypair JSON: {e}")))?;
 
@@ -138,6 +177,128 @@ impl ImportCommand {
             }),
         );
 
+        Ok(())
+    }
+}
+
+impl ImportCommand {
+    #[cfg(feature = "evm")]
+    fn run_evm(self) -> pay_core::Result<()> {
+        use pay_core::chain::{ChainFamily, ChainSigner, EvmChainSigner};
+
+        let network = self.network.as_deref().ok_or_else(|| {
+            pay_core::Error::Config(
+                "`--chain-family evm` requires `--network <slug>` \
+                 (e.g. `sepolia`, `base`, `base-sepolia`)."
+                    .to_string(),
+            )
+        })?;
+        if !pay_core::accounts::is_evm_network_family(network) {
+            return Err(pay_core::Error::Config(format!(
+                "`{network}` is not a recognized EVM network slug. \
+                 Supported: ethereum, base, optimism, arbitrum, sepolia, \
+                 holesky, base-sepolia."
+            )));
+        }
+        let raw_hex = self.secret_key_hex.as_deref().ok_or_else(|| {
+            pay_core::Error::Config(
+                "`--chain-family evm` requires `--secret-key-hex <HEX>` \
+                 (32 raw bytes, with or without 0x prefix)."
+                    .to_string(),
+            )
+        })?;
+
+        let chain_id = match ChainFamily::from_network_slug(network) {
+            ChainFamily::Evm { chain_id } => chain_id,
+            _ => unreachable!("is_evm_network_family already validated network slug"),
+        };
+
+        // EvmChainSigner::from_hex tolerates the leading 0x and validates
+        // both length and curve order. Reuse it as the canonical parser so
+        // CLI input drift stays in lockstep with the runtime signer.
+        let signer = EvmChainSigner::from_hex(raw_hex, chain_id).map_err(|e| {
+            pay_core::Error::Config(format!("Invalid secp256k1 private key: {e}"))
+        })?;
+        let address = signer.address();
+        let priv_bytes = signer.to_private_key_bytes();
+
+        // Show the derived address before sealing the key so the user can
+        // bail out if it doesn't match their expectation.
+        eprintln!();
+        eprintln!("  {} {}", "Address:".dimmed(), address);
+        eprintln!("  {} {} (chain id {chain_id})", "Network:".dimmed(), network.green());
+        eprintln!();
+
+        let theme = ColorfulTheme::default();
+        let mut accounts = pay_core::accounts::AccountsFile::load()?;
+        if let Some((existing_network, existing_name)) =
+            find_account_by_pubkey(&accounts, &address)
+        {
+            let proceed = Confirm::with_theme(&theme)
+                .with_prompt(format!(
+                    "This EVM address is already registered as \"{}\" on {}. Import anyway?",
+                    existing_name.yellow(),
+                    existing_network.yellow(),
+                ))
+                .default(false)
+                .interact()
+                .unwrap_or(false);
+            if !proceed {
+                eprintln!("Import cancelled.");
+                return Ok(());
+            }
+        }
+
+        let backend_id = match &self.backend {
+            Some(b) => b.clone(),
+            None => super::new::pick_backend()?,
+        };
+        let (ks, keystore_kind, _) = build_keystore(&backend_id, self.vault.as_deref())?;
+
+        if ks.evm_key_exists(&self.name) {
+            let overwrite = Confirm::with_theme(&theme)
+                .with_prompt(format!(
+                    "EVM key for '{}' already exists in this keystore. Overwrite?",
+                    self.name.yellow()
+                ))
+                .default(false)
+                .interact()
+                .unwrap_or(false);
+            if !overwrite {
+                return Err(pay_core::Error::Config("Import cancelled.".to_string()));
+            }
+        }
+
+        let intent = pay_core::keystore::AuthIntent::import_account(&self.name);
+        ks.import_evm_key_with_intent(&self.name, &priv_bytes, &intent)
+            .map_err(|e| pay_core::Error::Config(format!("{e}")))?;
+
+        accounts.upsert(
+            network,
+            &self.name,
+            pay_core::accounts::Account {
+                keystore: keystore_kind,
+                active: false,
+                auth_required: Some(true),
+                pubkey: Some(address.clone()),
+                vault: self.vault.clone(),
+                path: None,
+                account: None,
+                secret_key_b58: None,
+                chain_family: Some("evm".to_string()),
+                secret_key_hex: None,
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
+            },
+        );
+        accounts.save()?;
+
+        super::list::print_account_list(
+            &accounts,
+            Some(super::list::Highlight::Green {
+                network,
+                name: &self.name,
+            }),
+        );
         Ok(())
     }
 }
