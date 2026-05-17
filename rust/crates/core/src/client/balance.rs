@@ -436,9 +436,13 @@ mod evm_balances {
             "base" => "https://base.publicnode.com",
             "optimism" => "https://optimism.publicnode.com",
             "arbitrum" => "https://arbitrum-one.publicnode.com",
+            "polygon" => "https://polygon-bor-rpc.publicnode.com",
+            "avalanche" => "https://avalanche-c-chain-rpc.publicnode.com",
+            "linea" => "https://linea-rpc.publicnode.com",
             "sepolia" => "https://ethereum-sepolia.publicnode.com",
             "holesky" => "https://ethereum-holesky.publicnode.com",
             "base-sepolia" => "https://base-sepolia.publicnode.com",
+            "amoy" => "https://polygon-amoy-bor-rpc.publicnode.com",
             _ => "https://ethereum.publicnode.com",
         }
     }
@@ -454,9 +458,9 @@ mod evm_balances {
     /// surface that as an explicit error rather than guessing.
     pub fn evm_stablecoin_decimals(symbol: &str) -> Option<u8> {
         match symbol {
-            // USDC and USDT use 6 decimals on every chain we currently
-            // advertise; DAI/USDS-style 18-decimal tokens land here when added.
-            "USDC" | "USDT" => Some(6),
+            // USDC, USDT, PYUSD all use 6 decimals on Ethereum-family chains.
+            // DAI uses 18 (MakerDAO standard).
+            "USDC" | "USDT" | "PYUSD" => Some(6),
             "DAI" => Some(18),
             _ => None,
         }
@@ -469,11 +473,17 @@ mod evm_balances {
         match (network, symbol) {
             ("ethereum", "USDC") => Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
             ("ethereum", "USDT") => Some("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+            ("ethereum", "DAI") => Some("0x6B175474E89094C44Da98b954EedeAC495271d0F"),
+            ("ethereum", "PYUSD") => Some("0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"),
             ("base", "USDC") => Some("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
             ("optimism", "USDC") => Some("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"),
             ("arbitrum", "USDC") => Some("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
+            ("polygon", "USDC") => Some("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"),
+            ("avalanche", "USDC") => Some("0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"),
+            ("linea", "USDC") => Some("0x176211869cA2b568f2A7D4EE941E073a821EE1ff"),
             ("sepolia", "USDC") => Some("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
             ("base-sepolia", "USDC") => Some("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
+            ("amoy", "USDC") => Some("0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582"),
             _ => None,
         }
     }
@@ -487,13 +497,17 @@ mod evm_balances {
         ("base", 8453),
         ("optimism", 10),
         ("arbitrum", 42161),
+        ("polygon", 137),
+        ("avalanche", 43114),
+        ("linea", 59144),
         ("sepolia", 11155111),
         ("base-sepolia", 84532),
+        ("amoy", 80002),
     ];
 
     /// Symbols enumerated when building the reverse lookup. Matches the
     /// branches in `evm_stablecoin_address`/`evm_stablecoin_decimals`.
-    const EVM_STABLE_SYMBOLS: &[&str] = &["USDC", "USDT"];
+    const EVM_STABLE_SYMBOLS: &[&str] = &["USDC", "USDT", "DAI", "PYUSD"];
 
     /// Reverse of `evm_stablecoin_address`: given `(chain_id, ERC-20 address)`,
     /// return the canonical symbol (`"USDC"`, `"USDT"`) if we recognize it.
@@ -627,8 +641,13 @@ mod evm_balances {
             assert!(evm_default_rpc_url("base").contains("base"));
             assert!(evm_default_rpc_url("sepolia").contains("sepolia"));
             assert!(evm_default_rpc_url("base-sepolia").contains("base-sepolia"));
+            // Phase 19 chains.
+            assert!(evm_default_rpc_url("polygon").contains("polygon"));
+            assert!(evm_default_rpc_url("avalanche").contains("avalanche"));
+            assert!(evm_default_rpc_url("linea").contains("linea"));
+            assert!(evm_default_rpc_url("amoy").contains("amoy"));
             // Unknown slug falls back to Ethereum mainnet rather than panicking.
-            assert!(evm_default_rpc_url("polygon").contains("ethereum"));
+            assert!(evm_default_rpc_url("solana-fake").contains("ethereum"));
         }
 
         #[test]
@@ -662,9 +681,45 @@ mod evm_balances {
             assert!(evm_stablecoin_address("base", "USDC").is_some());
             assert!(evm_stablecoin_address("sepolia", "USDC").is_some());
             assert!(evm_stablecoin_address("base-sepolia", "USDC").is_some());
+            // Phase 19 additions.
+            assert!(evm_stablecoin_address("ethereum", "DAI").is_some());
+            assert!(evm_stablecoin_address("ethereum", "PYUSD").is_some());
+            assert!(evm_stablecoin_address("polygon", "USDC").is_some());
+            assert!(evm_stablecoin_address("avalanche", "USDC").is_some());
+            assert!(evm_stablecoin_address("linea", "USDC").is_some());
+            assert!(evm_stablecoin_address("amoy", "USDC").is_some());
             // Unknown pair returns None rather than guessing.
-            assert!(evm_stablecoin_address("polygon", "USDC").is_none());
             assert!(evm_stablecoin_address("base", "USDT").is_none());
+            assert!(evm_stablecoin_address("polygon", "PYUSD").is_none());
+        }
+
+        #[test]
+        fn evm_stablecoin_decimals_recognizes_phase19_tokens() {
+            assert_eq!(evm_stablecoin_decimals("USDC"), Some(6));
+            assert_eq!(evm_stablecoin_decimals("USDT"), Some(6));
+            assert_eq!(evm_stablecoin_decimals("DAI"), Some(18));
+            assert_eq!(evm_stablecoin_decimals("PYUSD"), Some(6));
+            assert_eq!(evm_stablecoin_decimals("UNKNOWN"), None);
+        }
+
+        #[test]
+        fn evm_symbol_for_reverses_phase19_pairs() {
+            assert_eq!(
+                evm_symbol_for(137, "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"),
+                Some("USDC")
+            );
+            assert_eq!(
+                evm_symbol_for(1, "0x6B175474E89094C44Da98b954EedeAC495271d0F"),
+                Some("DAI")
+            );
+            assert_eq!(
+                evm_symbol_for(1, "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"),
+                Some("PYUSD")
+            );
+            assert_eq!(
+                evm_symbol_for(43114, "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"),
+                Some("USDC")
+            );
         }
 
         #[test]

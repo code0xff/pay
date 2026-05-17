@@ -34,9 +34,13 @@ impl ChainFamily {
             "base" => ChainFamily::Evm { chain_id: 8453 },
             "optimism" => ChainFamily::Evm { chain_id: 10 },
             "arbitrum" => ChainFamily::Evm { chain_id: 42161 },
+            "polygon" => ChainFamily::Evm { chain_id: 137 },
+            "avalanche" => ChainFamily::Evm { chain_id: 43114 },
+            "linea" => ChainFamily::Evm { chain_id: 59144 },
             "sepolia" => ChainFamily::Evm { chain_id: 11155111 },
             "holesky" => ChainFamily::Evm { chain_id: 17000 },
             "base-sepolia" => ChainFamily::Evm { chain_id: 84532 },
+            "amoy" => ChainFamily::Evm { chain_id: 80002 },
             other => {
                 if let Some(id_str) = other.strip_prefix("eip155:")
                     && let Ok(id) = id_str.parse::<u64>()
@@ -68,9 +72,13 @@ impl ChainFamily {
             ChainFamily::Evm { chain_id: 8453 } => "base",
             ChainFamily::Evm { chain_id: 10 } => "optimism",
             ChainFamily::Evm { chain_id: 42161 } => "arbitrum",
+            ChainFamily::Evm { chain_id: 137 } => "polygon",
+            ChainFamily::Evm { chain_id: 43114 } => "avalanche",
+            ChainFamily::Evm { chain_id: 59144 } => "linea",
             ChainFamily::Evm { chain_id: 11155111 } => "sepolia",
             ChainFamily::Evm { chain_id: 17000 } => "holesky",
             ChainFamily::Evm { chain_id: 84532 } => "base-sepolia",
+            ChainFamily::Evm { chain_id: 80002 } => "amoy",
             ChainFamily::Evm { .. } => "evm-unknown",
         }
     }

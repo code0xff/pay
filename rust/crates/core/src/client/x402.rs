@@ -448,6 +448,8 @@ fn currency_preference(symbol: &str) -> u8 {
     match symbol.to_ascii_uppercase().as_str() {
         "USDC" => 0,
         "USDT" => 1,
+        "DAI" => 2,
+        "PYUSD" => 3,
         _ => 99,
     }
 }

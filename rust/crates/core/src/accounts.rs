@@ -220,13 +220,23 @@ impl Account {
 pub fn is_evm_network_family(network: &str) -> bool {
     matches!(
         network,
-        "ethereum" | "base" | "optimism" | "arbitrum" | "sepolia" | "holesky" | "base-sepolia"
+        "ethereum"
+            | "base"
+            | "optimism"
+            | "arbitrum"
+            | "polygon"
+            | "avalanche"
+            | "linea"
+            | "sepolia"
+            | "holesky"
+            | "base-sepolia"
+            | "amoy"
     )
 }
 
 /// EVM testnets where missing entries can be lazily auto-generated.
 pub fn is_evm_lazy_network(network: &str) -> bool {
-    matches!(network, "sepolia" | "holesky" | "base-sepolia")
+    matches!(network, "sepolia" | "holesky" | "base-sepolia" | "amoy")
 }
 
 // ── AccountsFile ────────────────────────────────────────────────────────────
