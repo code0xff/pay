@@ -24,8 +24,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FacilitatorError {
+    /// Transport-level error. We strip the URL via `reqwest::Error::without_url`
+    /// before stringifying so the base URL — which may contain an API key in
+    /// its query string for some hosted facilitators — never reaches logs.
     #[error("facilitator HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
     #[error("facilitator returned non-2xx ({status}): {body}")]
     Status { status: u16, body: String },
     #[error("facilitator returned malformed JSON: {0}")]
@@ -34,6 +37,27 @@ pub enum FacilitatorError {
     Invalid(String),
     #[error("facilitator failed to settle: {0}")]
     Settle(String),
+}
+
+impl From<reqwest::Error> for FacilitatorError {
+    fn from(e: reqwest::Error) -> Self {
+        FacilitatorError::Http(e.without_url().to_string())
+    }
+}
+
+impl FacilitatorError {
+    /// Distinguishes transient failures (network blip, 5xx) from definitive
+    /// rejections (4xx, signature/chain mismatch) so callers don't tag a
+    /// permanent misconfiguration as "retryable" in telemetry.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            FacilitatorError::Http(_) => true,
+            FacilitatorError::Status { status, .. } => !(400..500).contains(status),
+            FacilitatorError::Decode(_) => false,
+            FacilitatorError::Invalid(_) => false,
+            FacilitatorError::Settle(_) => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -5,6 +5,7 @@
 //! `PAYMENT-SIGNATURE` header for `eip155:*` networks. The module is only
 //! compiled under the `evm` Cargo feature; the Solana payment path never
 //! touches it.
+#![cfg(feature = "evm")]
 
 use solana_x402::exact::PaymentRequirements;
 use tracing::info;
@@ -44,14 +45,21 @@ pub fn build_evm_payment(
 
     let _ = challenge; // resource info already lives inside requirements
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::Mpp(format!("Failed to create runtime: {e}")))?;
-
-    let header_value = rt
-        .block_on(sign_evm_payment(&evm_signer, requirements))
-        .map_err(|e| Error::Mpp(format!("Failed to build EVM x402 payment: {e}")))?;
+    // EIP-712 / ERC-3009 signing is purely local (no network I/O), so a
+    // lightweight current-thread runtime is sufficient. Avoids spawning a
+    // fresh multi-thread worker pool on every 402 retry, which under
+    // concurrent load would exhaust OS thread limits.
+    let header_value = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(sign_evm_payment(&evm_signer, requirements))
+        }),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::Mpp(format!("Failed to create runtime: {e}")))?
+            .block_on(sign_evm_payment(&evm_signer, requirements)),
+    }
+    .map_err(|e| Error::Mpp(format!("Failed to build EVM x402 payment: {e}")))?;
 
     info!(
         network = %network,
@@ -133,7 +141,7 @@ mod tests {
             path: None,
             secret_key_b58: None,
             chain_family: Some("evm".to_string()),
-            secret_key_hex: Some(signer.to_hex_key()),
+            secret_key_hex: Some(signer.to_hex_key().to_string()),
             created_at: Some("2026-05-12T00:00:00Z".to_string()),
         }
     }

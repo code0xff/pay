@@ -5,11 +5,16 @@
 //! module is only used by the x402 multi-chain dispatch path.
 //!
 //! The entire module is gated behind the `evm` Cargo feature; the
-//! Solana-only build does not include any of these types.
+//! Solana-only build does not include any of these types. The file-level
+//! `#![cfg]` below mirrors the `mod` gate in `lib.rs` so a stray
+//! `pub use crate::chain::…` in Solana-only code surfaces immediately
+//! at the source rather than as a confusing missing-module error.
+#![cfg(feature = "evm")]
 
 use crate::{Error, Result};
 // Brings `with_chain_id` into scope for `PrivateKeySigner`.
 use alloy::signers::Signer;
+use zeroize::Zeroizing;
 
 // ── ChainFamily ──────────────────────────────────────────────────────────────
 
@@ -91,7 +96,11 @@ impl ChainFamily {
 /// become `async fn` (or block on a runtime).
 pub trait ChainSigner: Send + Sync {
     /// Sign a raw message (already hashed if needed by the scheme).
-    fn sign_raw(&self, message: &[u8]) -> Vec<u8>;
+    ///
+    /// Returns an error on signer failure so callers don't silently submit
+    /// an empty signature that would surface as a generic "verification
+    /// failed" downstream and hide the real cause (e.g. key corruption).
+    fn sign_raw(&self, message: &[u8]) -> Result<Vec<u8>>;
 
     /// Public address — 0x-hex for EVM.
     fn address(&self) -> String;
@@ -119,6 +128,16 @@ impl EvmChainSigner {
         Ok(Self { signer, chain_id })
     }
 
+    /// Create from raw 32-byte secp256k1 private key. Preferred over
+    /// `from_hex` for keys loaded from a keystore — avoids materializing an
+    /// unzeroized hex `String` on the heap on the way in.
+    pub fn from_bytes(bytes: &[u8; 32], chain_id: u64) -> Result<Self> {
+        let signer = alloy::signers::local::PrivateKeySigner::from_slice(bytes)
+            .map_err(|e| Error::Config(format!("Invalid EVM private key bytes: {e}")))?;
+        let signer = signer.with_chain_id(Some(chain_id));
+        Ok(Self { signer, chain_id })
+    }
+
     /// Generate a fresh random ephemeral signer.
     pub fn random(chain_id: u64) -> Self {
         let signer =
@@ -126,9 +145,12 @@ impl EvmChainSigner {
         Self { signer, chain_id }
     }
 
-    /// Export 32-byte private key as lowercase hex (no 0x prefix).
-    pub fn to_hex_key(&self) -> String {
-        hex::encode(self.signer.credential().to_bytes())
+    /// Export 32-byte private key as lowercase hex (no 0x prefix). The
+    /// returned `Zeroizing<String>` is wiped on drop so temporary copies
+    /// don't linger in the heap; callers that need a long-lived `String`
+    /// (e.g. for serializing into `accounts.yml`) must clone explicitly.
+    pub fn to_hex_key(&self) -> Zeroizing<String> {
+        Zeroizing::new(hex::encode(self.signer.credential().to_bytes()))
     }
 
     /// Export the raw 32-byte secp256k1 private key. Used when persisting to
@@ -139,16 +161,16 @@ impl EvmChainSigner {
 }
 
 impl ChainSigner for EvmChainSigner {
-    fn sign_raw(&self, message: &[u8]) -> Vec<u8> {
+    fn sign_raw(&self, message: &[u8]) -> Result<Vec<u8>> {
         use alloy::signers::SignerSync;
         self.signer
             .sign_message_sync(message)
             .map(|sig| sig.as_bytes().to_vec())
-            .unwrap_or_default()
+            .map_err(|e| Error::Config(format!("EVM sign_message_sync failed: {e}")))
     }
 
     fn address(&self) -> String {
-        format!("{:?}", self.signer.address())
+        self.signer.address().to_checksum(None)
     }
 
     fn chain_family(&self) -> ChainFamily {

@@ -7325,6 +7325,7 @@ dependencies = [
  "uuid",
  "x402-chain-eip155",
  "x402-types",
+ "zeroize",
 ]
 
 [[package]]

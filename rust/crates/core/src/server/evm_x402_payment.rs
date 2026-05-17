@@ -181,7 +181,7 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
                 .body(Body::from(
                     r#"{"error":"not_found","message":"method not allowed"}"#,
                 ))
-                .unwrap();
+                .expect("static response with valid status, header, and body never fails to build");
         }
         return next.run(req).await;
     }
@@ -353,13 +353,72 @@ async fn handle_payment(
         }
     };
 
+    // Cross-check that the EIP-3009 authorization the payer signed targets
+    // the same token contract the requirements describe. Without this, a
+    // payer could submit a signature against a *different* asset; the
+    // facilitator would still reject it, but the error would surface as a
+    // misleading "nonce_already_used_on_chain" because
+    // `authorizationState(expected.asset, …)` returns `false` for an
+    // unrelated contract's nonce-space.
+    let authorization_to = payment_payload
+        .pointer("/payload/authorization/to")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !addresses_equal(authorization_to, &expected.asset) {
+        let msg = format!(
+            "authorization.to `{authorization_to}` does not match requirements.asset `{}`",
+            expected.asset
+        );
+        tracing::warn!(error = %msg, "EVM x402 envelope targets wrong token contract");
+        return verification_failed_response(&msg);
+    }
+
+    // Local `validBefore` sanity check. Saves a facilitator round trip when
+    // the authorization is already expired and adds defense-in-depth against
+    // a facilitator with clock skew. We accept either decimal or 0x-hex
+    // strings (EIP-3009 encodes uint256 timestamps both ways in the wild)
+    // and only reject when we can definitively prove the deadline has
+    // passed — a missing/unparseable field is left for the facilitator.
+    if let Some(valid_before_str) = payment_payload
+        .pointer("/payload/authorization/validBefore")
+        .and_then(|v| v.as_str())
+    {
+        let parsed = if let Some(hex) = valid_before_str.strip_prefix("0x") {
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            valid_before_str.parse::<u64>().ok()
+        };
+        if let Some(valid_before) = parsed {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if valid_before <= now {
+                let msg = format!(
+                    "authorization.validBefore `{valid_before}` is in the past (now={now})"
+                );
+                telemetry::record_settlement_error(
+                    "x402_evm",
+                    subdomain,
+                    path,
+                    "authorization_expired",
+                    false,
+                );
+                return verification_failed_response(&msg);
+            }
+        }
+    }
+
     // Phase 11-2b: take the in-flight slot. This is the only thing that
     // closes the window between `facilitator.settle` kicking off and the
     // on-chain authorization-state flipping to `true` — both the gateway-
     // local `authorizationState` view and Phase 11-1's receipt check are
     // blind to a duplicate that arrives *during* that window. The guard
     // releases automatically on every exit path (including the unwind).
-    let _guard = match in_flight.try_acquire(nonce_key) {
+    // The leading `_` keeps clippy quiet about the unused binding while
+    // the explicit name documents the load-bearing RAII lifetime — drop
+    // it and the duplicate window re-opens.
+    let _in_flight_guard = match in_flight.try_acquire(nonce_key) {
         Some(g) => g,
         None => {
             telemetry::record_settlement_error(
@@ -408,8 +467,9 @@ async fn handle_payment(
             return verification_failed_response(&reason);
         }
         Err(e) => {
+            let retryable = e.is_retryable();
             let msg = e.to_string();
-            telemetry::record_settlement_error("x402_evm", subdomain, path, &msg, true);
+            telemetry::record_settlement_error("x402_evm", subdomain, path, &msg, retryable);
             return verification_failed_response(&msg);
         }
         Ok(_) => {}
@@ -418,8 +478,9 @@ async fn handle_payment(
     let settle = match facilitator.settle(&payment_payload, &requirements).await {
         Ok(r) => r,
         Err(e) => {
+            let retryable = e.is_retryable();
             let msg = e.to_string();
-            telemetry::record_settlement_error("x402_evm", subdomain, path, &msg, true);
+            telemetry::record_settlement_error("x402_evm", subdomain, path, &msg, retryable);
             return verification_failed_response(&msg);
         }
     };
@@ -567,13 +628,16 @@ async fn build_evm_requirements(
         };
 
     let decimals = meta.decimals as u32;
-    let scaled = amount_usd * 10f64.powi(decimals as i32);
-    if scaled > (u64::MAX as f64) {
-        return Err(format!(
-            "EVM x402 price `{amount_usd}` exceeds the u64 base-unit ceiling"
-        ));
-    }
-    let raw_amount = scaled.round() as u128;
+    // Scale via fixed-precision string formatting rather than `amount_usd * 10^decimals`.
+    // f64's 53-bit mantissa cannot represent the base-unit count exactly for 18-decimal
+    // tokens (e.g. DAI at $1000 → 10^21 base units) and loses cents for USDC values like
+    // `0.100001` → 100000.999… which `as u128` would truncate to 100000, producing
+    // an underpaid envelope that the facilitator rejects.
+    let formatted = format!("{:.*}", decimals as usize, amount_usd);
+    let combined: String = formatted.chars().filter(|c| *c != '.').collect();
+    let raw_amount: u128 = combined.parse().map_err(|_| {
+        format!("EVM x402 price `{amount_usd}` exceeds the u128 base-unit ceiling")
+    })?;
 
     // Phase 13-2: typed struct serialization instead of ad-hoc json! macro.
     let req = EvmPaymentRequirements {
@@ -719,6 +783,20 @@ async fn verify_onchain_receipt(
         ));
     }
     Ok(())
+}
+
+/// Case-insensitive 0x-hex equality for two EVM addresses. Both inputs go
+/// through `alloy::primitives::Address` parsing so the comparison ignores
+/// EIP-55 checksum case and tolerates a missing `0x` prefix.
+fn addresses_equal(a: &str, b: &str) -> bool {
+    use std::str::FromStr;
+    match (
+        alloy::primitives::Address::from_str(a),
+        alloy::primitives::Address::from_str(b),
+    ) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 fn address_as_topic(addr: alloy::primitives::Address) -> alloy::primitives::B256 {
@@ -918,11 +996,11 @@ mod tests {
     #[tokio::test]
     async fn build_evm_requirements_rejects_oversize_price() {
         let uri: axum::http::Uri = "/v1/test".parse().unwrap();
-        // 1e30 USD × 10^6 base units > u64::MAX (~1.8e19).
-        let err = build_evm_requirements("", "sepolia", "0xabc", "USDC", 1e30, &uri, None)
+        // 1e35 USD × 10^6 base units = 1e41 > u128::MAX (~3.4e38).
+        let err = build_evm_requirements("", "sepolia", "0xabc", "USDC", 1e35, &uri, None)
             .await
             .unwrap_err();
-        assert!(err.contains("u64 base-unit ceiling"));
+        assert!(err.contains("u128 base-unit ceiling"), "got: {err}");
     }
 
     #[test]

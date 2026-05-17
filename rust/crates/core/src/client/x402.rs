@@ -304,11 +304,16 @@ fn build_siwx_header(
 /// Priority (first match wins):
 ///   1. `network_override` (CLI `--network`) — pick the entry whose
 ///      normalized network slug or `cluster` field matches.
-///   2. First entry whose normalized network already has a `default`
-///      account configured in `accounts.yml`.
-///   3. First non-EVM entry (Solana preference — preserves prior behaviour
-///      for servers that advertise both Solana and EVM).
-///   4. First entry overall.
+///   2. First entry whose normalized network has *any* account configured
+///      in `accounts.yml` (not just the literal `default` name — users may
+///      register a wallet under any name they like).
+///   3. First entry whose family (Solana vs EVM) matches what the user
+///      has actually configured *somewhere*. So an EVM-only user gets the
+///      EVM entry rather than being pushed onto the Solana branch and
+///      hitting a "no Solana wallet configured" error downstream.
+///   4. First non-EVM entry (Solana preference — preserves prior behaviour
+///      for the "no accounts at all" first-run case).
+///   5. First entry overall.
 pub fn select_best_chain<'a>(
     accepts: &'a [PaymentRequirements],
     store: &dyn AccountsStore,
@@ -327,14 +332,34 @@ pub fn select_best_chain<'a>(
         return Some(r);
     }
 
-    if let Ok(file) = store.load()
+    let file = store.load().ok();
+
+    if let Some(file) = &file
         && let Some(r) = accepts.iter().find(|r| {
             let slug = normalize_network(&r.network);
-            file.named_account_for_network(&slug, crate::accounts::DEFAULT_ACCOUNT_NAME)
-                .is_some()
+            file.account_for_network(&slug).is_some()
         })
     {
         return Some(r);
+    }
+
+    if let Some(file) = &file {
+        let has_evm = file
+            .accounts
+            .keys()
+            .any(|k| crate::accounts::is_evm_network_family(k));
+        let has_solana = file
+            .accounts
+            .keys()
+            .any(|k| !crate::accounts::is_evm_network_family(k));
+        if has_evm && !has_solana {
+            if let Some(r) = accepts.iter().find(|r| {
+                let slug = normalize_network(&r.network);
+                crate::accounts::is_evm_network_family(&slug)
+            }) {
+                return Some(r);
+            }
+        }
     }
 
     if let Some(r) = accepts.iter().find(|r| {

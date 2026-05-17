@@ -166,7 +166,7 @@ async fn send_erc20_async(req: EvmSendRequest<'_>) -> Result<EvmSendResult> {
 
     Ok(EvmSendResult {
         signature: format!("{:#x}", receipt.transaction_hash),
-        amount_raw: u256_saturate_u128(amount_raw),
+        amount_raw: u256_to_u128_checked(amount_raw)?,
         decimals,
         currency: req.stablecoin_symbol.to_string(),
         asset: token_hex.to_string(),
@@ -192,10 +192,17 @@ fn parse_evm_amount(s: &str, decimals: u8) -> Result<alloy::primitives::U256> {
     Ok(parsed.get_absolute())
 }
 
-fn u256_saturate_u128(v: alloy::primitives::U256) -> u128 {
+/// Narrow a U256 amount to u128 strictly. Real stablecoin amounts never
+/// approach 2^128, so a value that doesn't fit indicates either a parsing
+/// bug upstream or a token with nonsense decimals — surface it as an error
+/// instead of silently clamping to `u128::MAX` and reporting a wildly
+/// wrong "Sent X" line to the user.
+fn u256_to_u128_checked(v: alloy::primitives::U256) -> Result<u128> {
     if v <= alloy::primitives::U256::from(u128::MAX) {
-        v.to::<u128>()
+        Ok(v.to::<u128>())
     } else {
-        u128::MAX
+        Err(crate::Error::Config(format!(
+            "Transfer amount {v} exceeds u128 — refusing to truncate for display"
+        )))
     }
 }

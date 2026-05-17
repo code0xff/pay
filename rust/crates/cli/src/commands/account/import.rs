@@ -98,7 +98,7 @@ impl ImportCommand {
                 ))
                 .default(false)
                 .interact()
-                .unwrap_or(false);
+                .map_err(|e| pay_core::Error::Config(format!("Prompt error: {e}")))?;
 
             if !proceed {
                 eprintln!("Import cancelled.");
@@ -159,7 +159,7 @@ impl ImportCommand {
                 .with_prompt(format!("Set '{}' as the default account?", name.green()))
                 .default(false)
                 .interact()
-                .unwrap_or(false);
+                .map_err(|e| pay_core::Error::Config(format!("Prompt error: {e}")))?;
 
             if make_default {
                 accounts.set_active(pay_core::accounts::MAINNET_NETWORK, &name);
@@ -244,7 +244,7 @@ impl ImportCommand {
                 ))
                 .default(false)
                 .interact()
-                .unwrap_or(false);
+                .map_err(|e| pay_core::Error::Config(format!("Prompt error: {e}")))?;
             if !proceed {
                 eprintln!("Import cancelled.");
                 return Ok(());
@@ -265,7 +265,7 @@ impl ImportCommand {
                 ))
                 .default(false)
                 .interact()
-                .unwrap_or(false);
+                .map_err(|e| pay_core::Error::Config(format!("Prompt error: {e}")))?;
             if !overwrite {
                 return Err(pay_core::Error::Config("Import cancelled.".to_string()));
             }

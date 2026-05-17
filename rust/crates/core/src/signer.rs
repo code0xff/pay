@@ -584,8 +584,15 @@ pub fn load_evm_signer_for_network(
         let bytes = ks
             .load_evm_key_with_intent(account_name, &intent)
             .map_err(|e| map_keystore_backend_error(evm_backend_label(&account), e))?;
-        let hex_key = hex::encode(&*bytes);
-        let signer = EvmChainSigner::from_hex(&hex_key, chain_id)?;
+        // Pass raw 32-byte privkey straight to alloy — skipping the hex
+        // intermediary that would leave an un-zeroized `String` on the heap.
+        let key_array: [u8; 32] = (&*bytes).as_slice().try_into().map_err(|_| {
+            Error::Config(format!(
+                "EVM key for account `{account_name}` on `{network}` is not 32 bytes (got {})",
+                bytes.len()
+            ))
+        })?;
+        let signer = EvmChainSigner::from_bytes(&key_array, chain_id)?;
         return Ok((signer, None));
     }
 

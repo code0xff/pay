@@ -222,9 +222,16 @@ fn run_evm_topup(network: &str, account_override: Option<&str>) -> pay_core::Res
         };
         if current > baseline_usdc {
             let delta = current - baseline_usdc;
-            // USDC is 6-decimal on every EVM chain pay tracks; if more
-            // tokens land later, route this through evm_stablecoin_decimals.
-            let display = format!("{:.6}", delta as f64 / 1_000_000.0);
+            // Pull decimals from the canonical table rather than hard-coding 6;
+            // a future stablecoin with different decimals would otherwise show
+            // a display value off by orders of magnitude.
+            let decimals = pay_core::balance::evm_stablecoin_decimals("USDC").unwrap_or(6);
+            let scale = 10u128.pow(decimals as u32);
+            let display = format!(
+                "{:.*}",
+                decimals as usize,
+                delta as f64 / scale as f64
+            );
             components::print_notice(
                 components::NoticeLevel::Success,
                 "Account funded",

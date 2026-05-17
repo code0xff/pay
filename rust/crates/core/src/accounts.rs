@@ -663,7 +663,7 @@ fn generate_evm_ephemeral_account(network: &str) -> Account {
         path: None,
         secret_key_b58: None,
         chain_family: Some("evm".to_string()),
-        secret_key_hex: Some(signer.to_hex_key()),
+        secret_key_hex: Some(signer.to_hex_key().to_string()),
         created_at: Some(now_rfc3339()),
     }
 }
