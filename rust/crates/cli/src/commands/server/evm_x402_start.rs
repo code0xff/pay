@@ -14,6 +14,7 @@ use axum::middleware;
 use axum::routing::{any, get};
 use owo_colors::OwoColorize;
 use pay_core::PaymentState;
+use pay_core::server::evm_x402_payment::EvmTarget;
 use pay_core::server::in_flight::InFlight;
 use pay_core::server::session::SessionMpp;
 use pay_core::server::telemetry::FeePayerWallet;
@@ -25,7 +26,13 @@ use solana_mpp::server::Mpp;
 #[derive(Clone)]
 struct EvmAppState {
     apis: Arc<Vec<ApiSpec>>,
-    facilitator: Arc<FacilitatorClient>,
+    /// Phase 17: pre-validated EVM target table built at boot from
+    /// `operator.network` + `operator.extra_evm_networks`. The middleware
+    /// iterates this list to compose `accepts[]` and to dispatch incoming
+    /// payments by chain_id. The legacy `facilitator()` accessor returns
+    /// the first target's facilitator for back-compat with older state
+    /// consumers.
+    targets: Arc<Vec<EvmTarget>>,
     /// Per-node in-flight `(chain_id, from, nonce)` lock; the EVM x402
     /// middleware uses it to close the race window between facilitator
     /// settlement and on-chain mining. Naturally bounded by the number of
@@ -47,7 +54,7 @@ impl PaymentState for EvmAppState {
         Vec::new()
     }
     fn facilitator(&self) -> Option<&FacilitatorClient> {
-        Some(&self.facilitator)
+        self.targets.first().map(|t| t.facilitator.as_ref())
     }
     fn browser_rpc_url(&self) -> Option<&str> {
         None
@@ -61,6 +68,9 @@ impl PaymentState for EvmAppState {
     fn evm_in_flight(&self) -> Option<&InFlight> {
         Some(&self.in_flight)
     }
+    fn evm_targets(&self) -> &[EvmTarget] {
+        &self.targets
+    }
 }
 
 /// Block-on entry called from `StartCommand::run` once it has detected
@@ -73,51 +83,25 @@ pub fn run(bind: &str, api: ApiSpec) -> pay_core::Result<()> {
             "EVM x402 mode requires an `operator` block in the YAML spec".to_string(),
         )
     })?;
-    let network = operator.network.as_deref().ok_or_else(|| {
-        pay_core::Error::Config(
-            "EVM x402 mode requires `operator.network` (e.g. `base`, `sepolia`)".to_string(),
-        )
-    })?;
-    if !pay_core::accounts::is_evm_network_family(network) {
-        return Err(pay_core::Error::Config(format!(
-            "EVM x402 mode requires an EVM network slug; got `{network}`"
-        )));
+    // Phase 17: resolve every advertised EVM chain (primary + extras) up
+    // front. `resolve_evm_targets` enforces recipient/rpc/facilitator
+    // presence and rejects duplicate chain ids, so a misconfigured YAML
+    // fails here rather than on the first paid request.
+    let targets = pay_core::server::evm_x402_payment::resolve_evm_targets(operator)
+        .map_err(pay_core::Error::Config)?;
+    if targets.is_empty() {
+        return Err(pay_core::Error::Config(
+            "EVM x402 mode requires at least one EVM target chain (operator.network or operator.extra_evm_networks)"
+                .to_string(),
+        ));
     }
-    let recipient = operator.recipient.as_deref().ok_or_else(|| {
-        pay_core::Error::Config(
-            "EVM x402 mode requires `operator.recipient` (the gateway's EVM hex address)"
-                .to_string(),
-        )
-    })?;
-    let facilitator_url = operator.facilitator_url.as_deref().ok_or_else(|| {
-        pay_core::Error::Config(
-            "EVM x402 mode requires `operator.facilitator_url` so the gateway can delegate verify+settle to an external facilitator"
-                .to_string(),
-        )
-    })?;
-    // Phase 11-1 boot guard: the middleware re-checks the facilitator's
-    // settle response against an on-chain receipt, which needs an EVM RPC
-    // URL. Fail fast at startup rather than discovering this on the first
-    // paid request.
-    let rpc_url = operator
-        .rpc_url
-        .as_deref()
-        .filter(|u| !u.is_empty())
-        .ok_or_else(|| {
-            pay_core::Error::Config(
-                "EVM x402 mode requires `operator.rpc_url` so the gateway can verify on-chain receipts after the facilitator settles"
-                    .to_string(),
-            )
-        })?;
-
-    let facilitator = Arc::new(FacilitatorClient::new(facilitator_url));
     let in_flight = Arc::new(InFlight::new());
 
     let bind = bind.to_string();
     let api_for_router = api.clone();
     let state = EvmAppState {
         apis: Arc::new(vec![api_for_router]),
-        facilitator,
+        targets: Arc::new(targets),
         in_flight,
     };
 
@@ -127,7 +111,7 @@ pub fn run(bind: &str, api: ApiSpec) -> pay_core::Result<()> {
         .map_err(|e| pay_core::Error::Config(format!("Failed to build tokio runtime: {e}")))?;
 
     rt.block_on(async move {
-        print_banner(network, recipient, facilitator_url, rpc_url, &state.apis[0]);
+        print_banner(&state.targets, &state.apis[0]);
 
         let api_for_fallback = state.apis[0].clone();
         let mut app: axum::Router<EvmAppState> = axum::Router::new()
@@ -184,22 +168,27 @@ pub fn run(bind: &str, api: ApiSpec) -> pay_core::Result<()> {
     })
 }
 
-fn print_banner(
-    network: &str,
-    recipient: &str,
-    facilitator_url: &str,
-    rpc_url: &str,
-    api: &ApiSpec,
-) {
+fn print_banner(targets: &[EvmTarget], api: &ApiSpec) {
     let banner = crate::components::render_pay_banner(crate::components::PAY_SH_TAGLINE.dimmed());
     if !banner.is_empty() {
         eprintln!("{banner}");
         eprintln!();
     }
-    eprintln!("{}\t{} (EVM x402)", "network".dimmed(), network.green());
-    eprintln!("{}\t{}", "operator".dimmed(), recipient);
-    eprintln!("{}\t{}", "facilitator".dimmed(), facilitator_url);
-    eprintln!("{}\t{}", "rpc".dimmed(), rpc_url);
+    let chain_list = targets
+        .iter()
+        .map(|t| format!("{} (chain_id={})", t.network, t.chain_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!("{}\t{} (EVM x402)", "networks".dimmed(), chain_list.green());
+    for target in targets {
+        eprintln!(
+            "{}\t{} → {} via {}",
+            target.network.dimmed(),
+            target.recipient,
+            target.rpc_url,
+            target.facilitator.base_url(),
+        );
+    }
     eprintln!();
     let metered = api
         .endpoints

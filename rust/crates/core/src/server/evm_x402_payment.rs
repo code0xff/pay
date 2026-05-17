@@ -36,6 +36,8 @@ use serde_json::json;
 use solana_mpp::PAYMENT_RECEIPT_HEADER;
 use solana_x402::{PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER, X402_V1_PAYMENT_HEADER};
 
+use std::sync::Arc;
+
 use crate::PaymentState;
 use crate::accounts::is_evm_network_family;
 use crate::chain::ChainFamily;
@@ -45,6 +47,151 @@ use crate::server::in_flight::{InFlight, NonceKey};
 use crate::server::metering::{self, RequestProperties};
 use crate::server::telemetry;
 use crate::server::x402_facilitator::FacilitatorClient;
+
+/// One advertised EVM chain. Built at gateway startup from
+/// `operator.network` + `operator.extra_evm_networks` and exposed via
+/// [`PaymentState::evm_targets`]. The middleware composes `accepts[]` as
+/// the cartesian product of targets × currencies and dispatches incoming
+/// payments to the matching target by `chain_id`.
+#[derive(Clone, Debug)]
+pub struct EvmTarget {
+    /// pay network slug — `"ethereum"`, `"base"`, `"sepolia"`, etc.
+    pub network: String,
+    /// Resolved chain id, kept here so the dispatch path doesn't have to
+    /// re-parse `eip155:<id>` on every payment.
+    pub chain_id: u64,
+    /// EVM hex address receiving payments on this chain.
+    pub recipient: String,
+    /// JSON-RPC URL the gateway uses for `authorizationState` and
+    /// `getTransactionReceipt` calls on this chain.
+    pub rpc_url: String,
+    /// Per-chain facilitator. Multiple targets may share one Arc when
+    /// the same `facilitator_url` is reused across entries.
+    pub facilitator: Arc<FacilitatorClient>,
+}
+
+/// Resolve `(operator.network + operator.extra_evm_networks)` into a fully-
+/// validated `Vec<EvmTarget>`. Called once at gateway startup; the
+/// middleware never re-runs validation per request.
+///
+/// Errors when:
+/// - `operator.network` is set but not an EVM slug
+/// - any extra entry resolves to an empty `recipient`/`rpc_url`/`facilitator_url`
+///   after operator-level fallback
+/// - two targets resolve to the same `chain_id`
+pub fn resolve_evm_targets(
+    operator: &pay_types::metering::OperatorConfig,
+) -> Result<Vec<EvmTarget>, String> {
+    let mut out: Vec<EvmTarget> = Vec::new();
+    let primary_network = operator.network.as_deref();
+    let primary_recipient = operator.recipient.as_deref();
+    let primary_rpc = operator.rpc_url.as_deref().filter(|u| !u.is_empty());
+    let primary_facilitator_url = operator
+        .facilitator_url
+        .as_deref()
+        .filter(|u| !u.is_empty());
+
+    // Cache: facilitator URL → shared Arc, so targets that point at the
+    // same facilitator reuse the underlying reqwest client + connection
+    // pool instead of allocating one per chain.
+    let mut facilitator_cache: std::collections::BTreeMap<String, Arc<FacilitatorClient>> =
+        std::collections::BTreeMap::new();
+    let mut intern_facilitator = |url: &str| -> Arc<FacilitatorClient> {
+        facilitator_cache
+            .entry(url.to_string())
+            .or_insert_with(|| Arc::new(FacilitatorClient::new(url)))
+            .clone()
+    };
+
+    if let Some(network) = primary_network {
+        if !is_evm_network_family(network) {
+            return Err(format!(
+                "operator.network `{network}` is not an EVM slug; \
+                 EVM x402 mode requires an eip155-family network"
+            ));
+        }
+        let chain_id = match ChainFamily::from_network_slug(network) {
+            ChainFamily::Evm { chain_id } => chain_id,
+            _ => return Err(format!("operator.network `{network}` has no known chain id")),
+        };
+        let recipient = primary_recipient.ok_or_else(|| {
+            "operator.recipient is required for EVM x402 mode".to_string()
+        })?;
+        let rpc_url = primary_rpc.ok_or_else(|| {
+            "operator.rpc_url is required so the gateway can verify on-chain receipts"
+                .to_string()
+        })?;
+        let facilitator_url = primary_facilitator_url.ok_or_else(|| {
+            "operator.facilitator_url is required for EVM x402 mode".to_string()
+        })?;
+        out.push(EvmTarget {
+            network: network.to_string(),
+            chain_id,
+            recipient: recipient.to_string(),
+            rpc_url: rpc_url.to_string(),
+            facilitator: intern_facilitator(facilitator_url),
+        });
+    }
+
+    for extra in &operator.extra_evm_networks {
+        if !is_evm_network_family(&extra.network) {
+            return Err(format!(
+                "extra_evm_networks entry `{}` is not an EVM slug",
+                extra.network
+            ));
+        }
+        let chain_id = match ChainFamily::from_network_slug(&extra.network) {
+            ChainFamily::Evm { chain_id } => chain_id,
+            _ => {
+                return Err(format!(
+                    "extra_evm_networks entry `{}` has no known chain id",
+                    extra.network
+                ));
+            }
+        };
+        let recipient = extra
+            .recipient
+            .as_deref()
+            .or(primary_recipient)
+            .ok_or_else(|| {
+                format!(
+                    "extra_evm_networks entry `{}` has no recipient (and operator.recipient is unset)",
+                    extra.network
+                )
+            })?;
+        let rpc_url = extra
+            .rpc_url
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::client::balance::evm_default_rpc_url(&extra.network).to_string());
+        let facilitator_url = extra
+            .facilitator_url
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .or(primary_facilitator_url)
+            .ok_or_else(|| {
+                format!(
+                    "extra_evm_networks entry `{}` has no facilitator_url (and operator.facilitator_url is unset)",
+                    extra.network
+                )
+            })?;
+        if out.iter().any(|t| t.chain_id == chain_id) {
+            return Err(format!(
+                "extra_evm_networks entry `{}` resolves to chain_id {} which is already advertised",
+                extra.network, chain_id
+            ));
+        }
+        out.push(EvmTarget {
+            network: extra.network.clone(),
+            chain_id,
+            recipient: recipient.to_string(),
+            rpc_url,
+            facilitator: intern_facilitator(facilitator_url),
+        });
+    }
+    Ok(out)
+}
 
 /// Typed representation of an EVM x402 `PaymentRequirements` entry (Phase 13-2).
 ///
@@ -115,44 +262,26 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
         }
     };
 
-    let network_slug = match operator.network.as_deref() {
-        Some(n) if is_evm_network_family(n) => n,
-        Some(other) => {
-            return internal_error(&format!(
-                "EVM x402 middleware mounted but `operator.network` is `{other}` (not an EVM slug)"
-            ));
-        }
-        None => {
-            return internal_error("EVM x402 middleware mounted but `operator.network` is unset");
-        }
-    };
-    let recipient = match operator.recipient.as_deref() {
-        Some(r) => r,
-        None => {
-            return internal_error("EVM x402 server has no operator.recipient configured");
-        }
-    };
-
-    // Phase 11-1 dependency: receipt verification needs an EVM RPC URL.
-    // `evm_x402_start::run` rejects boot when `operator.rpc_url` is missing,
-    // so reaching here without a URL means a third-party caller mounted the
-    // middleware without going through the boot guard.
-    let rpc_url = match operator.rpc_url.as_deref() {
-        Some(u) if !u.is_empty() => u,
-        _ => {
+    // Phase 17: prefer the pre-validated `state.evm_targets()` table when
+    // the gateway runtime wired it. Older states that only set the legacy
+    // `facilitator()` getter fall through to a per-request resolve so we
+    // stay backward compatible. The resolve is cheap and only runs when
+    // the state forgot to call `resolve_evm_targets` at boot.
+    let state_targets = state.evm_targets();
+    let owned_targets: Vec<EvmTarget>;
+    let targets: &[EvmTarget] = if !state_targets.is_empty() {
+        state_targets
+    } else {
+        owned_targets = match resolve_evm_targets(operator) {
+            Ok(t) => t,
+            Err(e) => return internal_error(&format!("evm_targets_resolve_failed: {e}")),
+        };
+        if owned_targets.is_empty() {
             return internal_error(
-                "EVM x402 server requires operator.rpc_url for on-chain receipt verification",
+                "EVM x402 middleware mounted but no EVM target chains are configured",
             );
         }
-    };
-
-    let facilitator = match state.facilitator() {
-        Some(f) => f,
-        None => {
-            return internal_error(
-                "EVM x402 server requires operator.facilitator_url to be configured",
-            );
-        }
+        &owned_targets
     };
 
     let in_flight = match state.evm_in_flight() {
@@ -198,34 +327,43 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
         }
     };
 
-    // Phase 13-4: advertise all configured currencies in the accepts array.
-    // build_evm_requirements is now async (fetches decimals + EIP-712 domain
-    // on-chain on first call; subsequent calls read from cache).
+    // Phase 17: advertise the cartesian product of (targets × currencies).
+    // Phase 13-4 introduced per-currency accepts; Phase 17 adds per-chain
+    // by iterating the resolved EvmTarget table on top. Each accepts entry
+    // carries its own network so the client (and our own dispatch logic
+    // below) can route the payment to the right chain.
     let currency_symbols = pick_currency_symbols(operator);
     let description = endpoint.and_then(|ep| ep.description.as_deref());
-    let mut accepts: Vec<serde_json::Value> = Vec::with_capacity(currency_symbols.len());
-    for sym in &currency_symbols {
-        match build_evm_requirements(
-            rpc_url,
-            network_slug,
-            recipient,
-            sym,
-            amount_usd,
-            &uri,
-            description,
-        )
-        .await
-        {
-            Ok(req) => accepts.push(req),
-            Err(e) => {
-                tracing::warn!(symbol = %sym, error = %e, "Skipping currency symbol in accepts")
+    let mut accepts: Vec<serde_json::Value> =
+        Vec::with_capacity(currency_symbols.len() * targets.len());
+    for target in targets {
+        for sym in &currency_symbols {
+            match build_evm_requirements(
+                &target.rpc_url,
+                &target.network,
+                &target.recipient,
+                sym,
+                amount_usd,
+                &uri,
+                description,
+            )
+            .await
+            {
+                Ok(req) => accepts.push(req),
+                Err(e) => {
+                    tracing::warn!(
+                        network = %target.network,
+                        symbol = %sym,
+                        error = %e,
+                        "Skipping (chain, currency) in accepts",
+                    )
+                }
             }
         }
     }
     if accepts.is_empty() {
-        return internal_error("No valid currencies configured for this EVM network");
+        return internal_error("No valid (chain, currency) combinations configured");
     }
-    let primary_requirements = accepts[0].clone();
     let primary_symbol = &currency_symbols[0];
 
     let payment_header = headers
@@ -245,11 +383,10 @@ pub async fn evm_x402_payment_middleware<S: PaymentState>(
         ),
         Some(header) => {
             handle_payment(
-                facilitator,
-                rpc_url,
+                targets,
                 in_flight,
                 header,
-                primary_requirements,
+                &accepts,
                 subdomain,
                 &path,
                 req,
@@ -312,16 +449,15 @@ fn challenge_response(
 
 #[tracing::instrument(
     name = "evm_x402_payment",
-    skip(facilitator, in_flight, header, requirements, req, next),
+    skip(targets, in_flight, header, accepts, req, next),
     fields(subdomain = %subdomain, path = %path)
 )]
 #[allow(clippy::too_many_arguments)]
 async fn handle_payment(
-    facilitator: &FacilitatorClient,
-    rpc_url: &str,
+    targets: &[EvmTarget],
     in_flight: &InFlight,
     header: String,
-    requirements: serde_json::Value,
+    accepts: &[serde_json::Value],
     subdomain: &str,
     path: &str,
     req: Request<Body>,
@@ -334,6 +470,54 @@ async fn handle_payment(
             return verification_failed_response(&e);
         }
     };
+
+    // Phase 17: pick the (chain, asset) tuple the payer signed. The
+    // payment payload carries its own `payload.network` (CAIP-2) and
+    // `payload.authorization.to` (token contract); we look up the
+    // matching advertised requirements + EvmTarget so verification runs
+    // against the right RPC/facilitator/recipient. A payload that doesn't
+    // match any advertised offer is rejected up front rather than going
+    // to a facilitator that can't possibly settle it.
+    let payload_network = payment_payload
+        .pointer("/payload/network")
+        .and_then(|v| v.as_str())
+        .or_else(|| payment_payload.get("network").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let payload_asset = payment_payload
+        .pointer("/payload/authorization/to")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let requirements = match accepts.iter().find(|r| {
+        r.get("network").and_then(|v| v.as_str()) == Some(payload_network)
+            && r.get("asset")
+                .and_then(|v| v.as_str())
+                .map(|a| addresses_equal(a, payload_asset))
+                .unwrap_or(false)
+    }) {
+        Some(r) => r.clone(),
+        None => {
+            let msg = format!(
+                "payment payload (network=`{payload_network}`, asset=`{payload_asset}`) \
+                 does not match any advertised accepts entry"
+            );
+            return verification_failed_response(&msg);
+        }
+    };
+    let target = match payload_network
+        .strip_prefix("eip155:")
+        .and_then(|s| s.parse::<u64>().ok())
+        .and_then(|chain_id| targets.iter().find(|t| t.chain_id == chain_id))
+    {
+        Some(t) => t,
+        None => {
+            return verification_failed_response(&format!(
+                "no advertised target chain matches payload network `{payload_network}`"
+            ));
+        }
+    };
+    let facilitator = target.facilitator.as_ref();
+    let rpc_url = target.rpc_url.as_str();
 
     // Phase 11-2a: extract the (chain_id, from, nonce) key and pull the
     // expected receipt fields up front. We need both for the in-flight
@@ -1071,5 +1255,126 @@ mod tests {
         let meter = empty_metering();
         let err = resolve_amount_usd(&meter, &RequestProperties::default(), None).unwrap_err();
         assert!(err.contains("no price"), "got: {err}");
+    }
+
+    // ── Phase 17 — multi-chain target resolution ──────────────────────────
+
+    fn op(json: serde_json::Value) -> pay_types::metering::OperatorConfig {
+        serde_json::from_value(json).expect("parse OperatorConfig")
+    }
+
+    #[test]
+    fn resolve_evm_targets_single_chain_legacy_config() {
+        // Operator with only the primary fields (no `extra_evm_networks`)
+        // produces a one-entry table — back-compat guard for existing
+        // single-chain YAML.
+        let cfg = op(serde_json::json!({
+            "network": "base",
+            "recipient": "0x1111111111111111111111111111111111111111",
+            "rpc_url": "https://base.example/rpc",
+            "facilitator_url": "https://facilitator.example",
+        }));
+        let targets = resolve_evm_targets(&cfg).expect("resolve");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].network, "base");
+        assert_eq!(targets[0].chain_id, 8453);
+        assert_eq!(targets[0].rpc_url, "https://base.example/rpc");
+    }
+
+    #[test]
+    fn resolve_evm_targets_appends_extras_with_fallback() {
+        // The extra entry omits rpc_url and facilitator_url; both should
+        // resolve via fallback (rpc_url → public publicnode.com default,
+        // facilitator_url → operator-level value).
+        let cfg = op(serde_json::json!({
+            "network": "base",
+            "recipient": "0x1111111111111111111111111111111111111111",
+            "rpc_url": "https://base.example/rpc",
+            "facilitator_url": "https://facilitator.example",
+            "extra_evm_networks": [
+                { "network": "optimism" }
+            ],
+        }));
+        let targets = resolve_evm_targets(&cfg).expect("resolve");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[1].network, "optimism");
+        assert_eq!(targets[1].chain_id, 10);
+        // Recipient inherited from operator-level value.
+        assert_eq!(targets[1].recipient, targets[0].recipient);
+        // Shared facilitator_url — same Arc reused.
+        assert!(Arc::ptr_eq(&targets[0].facilitator, &targets[1].facilitator));
+    }
+
+    #[test]
+    fn resolve_evm_targets_rejects_duplicate_chain_id() {
+        let cfg = op(serde_json::json!({
+            "network": "base",
+            "recipient": "0x1111111111111111111111111111111111111111",
+            "rpc_url": "https://base.example/rpc",
+            "facilitator_url": "https://facilitator.example",
+            "extra_evm_networks": [
+                { "network": "base" }
+            ],
+        }));
+        let err = resolve_evm_targets(&cfg).unwrap_err();
+        assert!(err.contains("already advertised"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_evm_targets_rejects_non_evm_extra() {
+        let cfg = op(serde_json::json!({
+            "network": "base",
+            "recipient": "0x1111111111111111111111111111111111111111",
+            "rpc_url": "https://base.example/rpc",
+            "facilitator_url": "https://facilitator.example",
+            "extra_evm_networks": [
+                { "network": "mainnet" }
+            ],
+        }));
+        let err = resolve_evm_targets(&cfg).unwrap_err();
+        assert!(err.contains("not an EVM slug"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_evm_targets_per_chain_recipient_overrides_operator() {
+        let cfg = op(serde_json::json!({
+            "network": "base",
+            "recipient": "0x1111111111111111111111111111111111111111",
+            "rpc_url": "https://base.example/rpc",
+            "facilitator_url": "https://facilitator.example",
+            "extra_evm_networks": [
+                {
+                    "network": "ethereum",
+                    "recipient": "0x2222222222222222222222222222222222222222",
+                    "rpc_url": "https://eth.example/rpc"
+                }
+            ],
+        }));
+        let targets = resolve_evm_targets(&cfg).expect("resolve");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[1].network, "ethereum");
+        assert_eq!(targets[1].chain_id, 1);
+        assert_eq!(
+            targets[1].recipient,
+            "0x2222222222222222222222222222222222222222"
+        );
+        assert_eq!(targets[1].rpc_url, "https://eth.example/rpc");
+    }
+
+    #[test]
+    fn resolve_evm_targets_extra_without_facilitator_fallback_fails() {
+        // No operator-level facilitator + no per-entry override → boot
+        // guard must reject so the runtime never tries to settle without
+        // a settlement endpoint.
+        let cfg = op(serde_json::json!({
+            "extra_evm_networks": [
+                {
+                    "network": "base",
+                    "recipient": "0x1111111111111111111111111111111111111111"
+                }
+            ],
+        }));
+        let err = resolve_evm_targets(&cfg).unwrap_err();
+        assert!(err.contains("facilitator_url"), "got: {err}");
     }
 }

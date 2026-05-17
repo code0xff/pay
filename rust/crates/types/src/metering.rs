@@ -595,6 +595,42 @@ pub struct OperatorConfig {
     /// Solana.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facilitator_url: Option<String>,
+    /// Additional EVM chains advertised alongside the primary `network`.
+    /// Each entry can override `recipient`/`rpc_url`/`facilitator_url` for
+    /// that chain. Empty by default — single-chain operators stay
+    /// untouched. The middleware composes `accepts[]` as the cartesian
+    /// product of `[primary network + extra_evm_networks]` × `currencies`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_evm_networks: Vec<EvmNetworkConfig>,
+}
+
+/// Per-chain override block under `operator.extra_evm_networks`.
+///
+/// The middleware uses the per-entry value when present, falling back to
+/// the operator-level field otherwise. Boot guard rejects an entry whose
+/// effective `recipient`/`rpc_url`/`facilitator_url` is empty after the
+/// fallback resolution.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvmNetworkConfig {
+    /// EVM network slug (`ethereum`, `base`, `optimism`, `sepolia`, ...).
+    pub network: String,
+    /// Recipient address on this chain. Falls back to the operator-level
+    /// `recipient` when omitted — useful when the same multisig is
+    /// deployed at an identical address across chains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
+    /// Per-chain JSON-RPC URL. Falls back to the well-known public RPC
+    /// when omitted (`evm_default_rpc_url`); the operator-level
+    /// `rpc_url` is *not* a valid fallback since it belongs to the
+    /// primary chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_url: Option<String>,
+    /// Per-chain facilitator URL. Falls back to operator-level
+    /// `facilitator_url`. Most facilitators handle multiple chains; the
+    /// per-entry override is for self-hosted single-chain facilitators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facilitator_url: Option<String>,
 }
 
 /// Signing backend configuration.

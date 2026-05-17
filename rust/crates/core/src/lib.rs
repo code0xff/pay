@@ -86,4 +86,16 @@ pub trait PaymentState: Clone + Send + Sync + 'static {
     fn evm_in_flight(&self) -> Option<&server::in_flight::InFlight> {
         None
     }
+    /// EVM target chains the gateway advertises in 402 envelopes. Each
+    /// `EvmTarget` carries its own recipient/rpc_url/facilitator so the
+    /// middleware can dispatch incoming payments to the matching chain.
+    /// Empty by default — Solana-only gateways need not implement this.
+    ///
+    /// When non-empty, the first entry is treated as the *primary* chain
+    /// (back-compat with the legacy single-chain `facilitator(&self)`
+    /// getter, which still returns this entry's facilitator).
+    #[cfg(feature = "evm")]
+    fn evm_targets(&self) -> &[server::evm_x402_payment::EvmTarget] {
+        &[]
+    }
 }
