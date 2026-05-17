@@ -57,15 +57,16 @@ pub struct BuiltPayment {
 ///
 /// The full `accepts` array is preserved in `Challenge::all_accepts` so the
 /// builder can re-select the entry whose chain family matches the configured
-/// wallet. The `requirements` field is seeded with the Solana mainnet entry
-/// (when present) for backward compatibility; falling back to the first
-/// `accepts` entry otherwise.
+/// wallet. The `requirements` field is seeded EVM-first on builds with the
+/// `evm` feature, then Solana mainnet, then the first accept — matching the
+/// payment dispatch order in `select_best_chain` and the index publication
+/// order in `skills::probe::pick_indexable_x402` so legacy single-entry
+/// consumers see the same chain the routing layer would have picked.
 pub fn parse(headers: &[(String, String)], body: Option<&str>) -> Option<Challenge> {
     let all_accepts = parse_payment_required_envelope(headers, body)
         .map(|env| env.accepts)
         .unwrap_or_default();
-    let requirements = parse_x402_challenge_for_network(headers, body, Some(SOLANA_MAINNET))
-        .or_else(|| all_accepts.first().cloned())?;
+    let requirements = pick_default_requirement(&all_accepts, headers, body)?;
     let siwx = parse_siwx_extension(headers, body).ok().flatten();
     Some(Challenge {
         x402_version: detect_x402_version(headers, body),
@@ -73,6 +74,30 @@ pub fn parse(headers: &[(String, String)], body: Option<&str>) -> Option<Challen
         all_accepts,
         siwx,
     })
+}
+
+/// EVM-first selection for the legacy single-`requirements` slot on
+/// `Challenge`. The order is: build-feature EVM hint, Solana mainnet hint,
+/// then the raw first entry. Each step is a no-op when its preferred
+/// family is absent from `all_accepts`.
+fn pick_default_requirement(
+    all_accepts: &[PaymentRequirements],
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Option<PaymentRequirements> {
+    #[cfg(feature = "evm")]
+    {
+        if let Some(r) = all_accepts
+            .iter()
+            .find(|r| r.network.starts_with("eip155:"))
+        {
+            return Some(r.clone());
+        }
+    }
+    if let Some(r) = parse_x402_challenge_for_network(headers, body, Some(SOLANA_MAINNET)) {
+        return Some(r);
+    }
+    all_accepts.first().cloned()
 }
 
 /// Try to parse an auth-only x402 SIWX challenge.
@@ -307,12 +332,11 @@ fn build_siwx_header(
 ///   2. First entry whose normalized network has *any* account configured
 ///      in `accounts.yml` (not just the literal `default` name — users may
 ///      register a wallet under any name they like).
-///   3. First entry whose family (Solana vs EVM) matches what the user
-///      has actually configured *somewhere*. So an EVM-only user gets the
-///      EVM entry rather than being pushed onto the Solana branch and
-///      hitting a "no Solana wallet configured" error downstream.
-///   4. First non-EVM entry (Solana preference — preserves prior behaviour
-///      for the "no accounts at all" first-run case).
+///   3. **EVM-first** (`cfg(feature = "evm")` only): first EVM entry. The
+///      user opted into EVM at build time so EVM is the default routing
+///      target when nothing more specific matched.
+///   4. First non-EVM entry (Solana preference — covers the Solana-only
+///      build and the "no accounts at all" first-run case).
 ///   5. First entry overall.
 pub fn select_best_chain<'a>(
     accepts: &'a [PaymentRequirements],
@@ -343,22 +367,18 @@ pub fn select_best_chain<'a>(
         return Some(r);
     }
 
-    if let Some(file) = &file {
-        let has_evm = file
-            .accounts
-            .keys()
-            .any(|k| crate::accounts::is_evm_network_family(k));
-        let has_solana = file
-            .accounts
-            .keys()
-            .any(|k| !crate::accounts::is_evm_network_family(k));
-        if has_evm && !has_solana {
-            if let Some(r) = accepts.iter().find(|r| {
-                let slug = normalize_network(&r.network);
-                crate::accounts::is_evm_network_family(&slug)
-            }) {
-                return Some(r);
-            }
+    // EVM-first dispatch under cfg(feature = "evm"): the user opted into
+    // EVM at build time, so when no per-account/network match steered us
+    // above this point, route to EVM by default. Solana-only builds skip
+    // this branch entirely and fall through to the Solana preference.
+    #[cfg(feature = "evm")]
+    {
+        let _ = &file;
+        if let Some(r) = accepts.iter().find(|r| {
+            let slug = normalize_network(&r.network);
+            crate::accounts::is_evm_network_family(&slug)
+        }) {
+            return Some(r);
         }
     }
 
@@ -369,6 +389,7 @@ pub fn select_best_chain<'a>(
         return Some(r);
     }
 
+    let _ = &file;
     accepts.first()
 }
 
@@ -1125,5 +1146,114 @@ mod tests {
             0,
             "named-account miss must not lazily create"
         );
+    }
+
+    // ── Phase 16 — EVM-first payment routing ─────────────────────────────
+
+    fn solana_accept() -> PaymentRequirements {
+        let mut r = sample_requirements();
+        r.network = SOLANA_MAINNET.to_string();
+        r.cluster = Some(SOLANA_MAINNET.to_string());
+        r.recipient = "SolanaRecipient".to_string();
+        r
+    }
+
+    fn evm_accept() -> PaymentRequirements {
+        let mut r = sample_requirements();
+        r.network = "eip155:8453".to_string();
+        r.cluster = None;
+        r.recipient = "0x0000000000000000000000000000000000000001".to_string();
+        r
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn parse_prefers_evm_entry_when_evm_feature_on() {
+        // Multi-chain envelope: parse() should surface the EVM accept as
+        // the legacy single `requirements` slot under the evm feature, so
+        // legacy single-entry consumers see the same chain the routing
+        // layer would actually pick.
+        let envelope = serde_json::json!({
+            "x402Version": 2,
+            "accepts": [solana_accept(), evm_accept()],
+        });
+        let body = envelope.to_string();
+        let challenge = parse(&[], Some(&body)).expect("parse");
+        assert_eq!(challenge.requirements.network, "eip155:8453");
+        assert_eq!(challenge.all_accepts.len(), 2);
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn select_best_chain_prefers_evm_under_evm_feature() {
+        // No accounts configured: EVM-first priority should kick in and
+        // route to the EVM entry rather than the historical Solana
+        // preference. Override is None so user opt-in via --network is
+        // not exercised here.
+        let store = MemoryAccountsStore::new();
+        let accepts = vec![solana_accept(), evm_accept()];
+        let chosen = select_best_chain(&accepts, &store, None).expect("pick");
+        assert_eq!(chosen.network, "eip155:8453");
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn select_best_chain_solana_account_still_wins_over_evm_first() {
+        // Priority 2 (configured-account match) outranks Phase 16's
+        // EVM-first default, so a Solana-only user with a configured
+        // mainnet account still gets routed to Solana when the envelope
+        // offers both. Regression guard for the EVM-only-user flow.
+        let mut file = AccountsFile::default();
+        file.upsert(
+            "mainnet",
+            "default",
+            Account {
+                keystore: Keystore::Ephemeral,
+                active: true,
+                auth_required: Some(false),
+                pubkey: Some("SolanaRecipient".to_string()),
+                vault: None,
+                account: None,
+                path: None,
+                secret_key_b58: Some(
+                    "5JxukKxgKf3sBJrxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                        .to_string(),
+                ),
+                chain_family: None,
+                secret_key_hex: None,
+                created_at: None,
+            },
+        );
+        let store = MemoryAccountsStore::with_file(file);
+        let accepts = vec![evm_accept(), solana_accept()];
+        let chosen = select_best_chain(&accepts, &store, None).expect("pick");
+        assert!(
+            chosen.network.starts_with("solana:"),
+            "configured Solana account must outrank EVM-first default; got {}",
+            chosen.network
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn select_best_chain_override_wins_over_evm_first() {
+        // CLI --network override is always priority 1 — verify EVM-first
+        // doesn't shadow an explicit Solana choice.
+        let store = MemoryAccountsStore::new();
+        let accepts = vec![solana_accept(), evm_accept()];
+        let chosen = select_best_chain(&accepts, &store, Some("mainnet")).expect("pick");
+        assert!(chosen.network.starts_with("solana:"));
+    }
+
+    #[test]
+    #[cfg(not(feature = "evm"))]
+    fn select_best_chain_solana_only_build_unchanged() {
+        // Solana-only build: EVM-first branch is compiled out, so the
+        // EVM entry is ignored and Solana wins by the legacy non-EVM
+        // preference. (Mirrors pre-Phase-16 behaviour.)
+        let store = MemoryAccountsStore::new();
+        let accepts = vec![evm_accept(), solana_accept()];
+        let chosen = select_best_chain(&accepts, &store, None).expect("pick");
+        assert!(chosen.network.starts_with("solana:"));
     }
 }
