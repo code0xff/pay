@@ -76,6 +76,74 @@ fn amount_to_usd(amount_str: &str, decimals: u8) -> Option<f64> {
     Some(raw as f64 / divisor)
 }
 
+/// Resolve an x402 accept entry to a CAIP-2 network + canonical symbol +
+/// decimals — handles both Solana (SPL mint mapping) and EVM (ERC-20
+/// address lookup gated on the `evm` Cargo feature). Returns `None` for any
+/// network/token combo we can't index (so the caller silently skips it
+/// rather than emitting a useless empty offer).
+/// Phase 15: choose the "primary" x402 accept entry for `ProbeStatus::Ok`.
+///
+/// `paid.chain_offers` carries the full multi-chain list independently, so
+/// this only picks which entry seeds the legacy flat `network`/`currency`
+/// fields. **EVM-first when the `evm` Cargo feature is enabled** — an
+/// EVM-built `pay` has explicitly opted into EVM and should highlight EVM
+/// options in the index for matching downstream consumers; the Solana-only
+/// build naturally falls through to Solana.
+fn pick_indexable_x402<'a>(
+    candidates: &'a [solana_x402::exact::PaymentRequirements],
+) -> Option<&'a solana_x402::exact::PaymentRequirements> {
+    #[cfg(feature = "evm")]
+    {
+        if let Some(r) = candidates
+            .iter()
+            .find(|r| resolve_offer(&r.network, &r.currency).is_some_and(|(caip2, _, _)| caip2.starts_with("eip155:")))
+        {
+            return Some(r);
+        }
+    }
+    if let Some(r) = candidates
+        .iter()
+        .find(|r| resolve_offer(&r.network, &r.currency).is_some_and(|(caip2, _, _)| caip2.starts_with("solana:")))
+    {
+        return Some(r);
+    }
+    // Last resort: any entry resolve_offer accepts (covers unknown CAIP-2
+    // prefixes added later without requiring a probe-side update).
+    candidates
+        .iter()
+        .find(|r| resolve_offer(&r.network, &r.currency).is_some())
+}
+
+fn resolve_offer(network: &str, asset: &str) -> Option<(String, String, u8)> {
+    if is_solana_network(network) {
+        let symbol = normalize_currency(asset);
+        if !is_usd_stable(&symbol) {
+            return None;
+        }
+        // Preserve the server's CAIP-2 form if it sent one; otherwise pin
+        // to mainnet — every legacy slug variant we accept points there.
+        let caip2 = if network.starts_with("solana:") {
+            network.to_string()
+        } else {
+            solana_x402::exact::SOLANA_MAINNET.to_string()
+        };
+        let decimals = decimals_for(&symbol);
+        return Some((caip2, symbol, decimals));
+    }
+    #[cfg(feature = "evm")]
+    {
+        if let Some(chain_id_str) = network.strip_prefix("eip155:")
+            && let Ok(chain_id) = chain_id_str.parse::<u64>()
+            && let Some(symbol) = crate::client::balance::evm_symbol_for(chain_id, asset)
+            && let Some(decimals) = crate::client::balance::evm_stablecoin_decimals(symbol)
+        {
+            return Some((network.to_string(), symbol.to_string(), decimals));
+        }
+    }
+    let _ = (network, asset); // silence unused warnings in no-evm builds
+    None
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 /// Configuration for a probe run.
@@ -101,29 +169,59 @@ impl Default for ProbeConfig {
 
 /// Aggregated metadata extracted from a 402 response.
 ///
-/// Captures every Solana-compatible payment option advertised across all MPP
+/// Captures every indexable payment option advertised across all MPP
 /// challenges and all x402 `accepts` entries — *not* just the one Pay would
 /// settle on. Downstream tooling uses this to populate per-endpoint
-/// `protocol[]`, `supported_usd[]`, and a USD price estimate.
+/// `pricing`, `protocol[]`, `supported_usd[]`, and per-chain offers.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PaidEndpoint {
-    /// Solana-compatible protocols advertised, sorted: any of `["mpp", "x402"]`.
+    /// Payment protocols advertised, sorted: any of `["mpp", "x402"]`.
     pub protocols: Vec<String>,
-    /// USD-pegged stablecoin symbols advertised on Solana, sorted unique.
+    /// USD-pegged stablecoin symbols advertised, sorted unique. Union of every
+    /// chain offered (Solana + EVM).
     pub supported_usd: Vec<String>,
-    /// Canonical USD price (cheapest USDC tier across challenges, else any
-    /// stable). `None` when the response carried no Solana payment info.
+    /// Canonical USD price (cheapest USDC tier across offers, else any
+    /// stable). `None` when the response carried no indexable payment info.
     pub price_usd: Option<f64>,
-    /// All distinct recipient addresses advertised across protocols.
+    /// All distinct recipient addresses advertised across protocols/chains.
     pub recipients: Vec<String>,
     /// Endpoint description sourced (in priority order) from x402
     /// `resource.description`, the bazaar input description, or the
     /// MPP challenge/request description. Empty when none useful.
     pub description: Option<String>,
     /// True when the 402 response advertises a sign-in-with-x extension and no
-    /// payment-acceptable Solana scheme — i.e. the endpoint is gated by SIWX
+    /// payment-acceptable scheme — i.e. the endpoint is gated by SIWX
     /// auth, not by a stablecoin payment.
     pub siwx_required: bool,
+    /// Per-(network, asset) advertised offers — Phase 15. Multi-chain servers
+    /// (Solana + EVM, or several EVM chains) emit one entry per accepts/MPP
+    /// challenge. Empty for endpoints whose 402 envelope had no indexable
+    /// option; serialization is skipped in that case so older index
+    /// consumers that pre-date this field don't see a noisy empty array.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain_offers: Vec<ChainOffer>,
+}
+
+/// One advertised payment option in a 402 response, scoped to a specific
+/// chain and token. Always uses CAIP-2 for `network` so downstream consumers
+/// can ignore pay-internal slug variations.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainOffer {
+    /// CAIP-2 chain identifier — `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`
+    /// or `eip155:8453`. Never empty.
+    pub network: String,
+    /// Normalized token symbol (USDC, USDT, …).
+    pub currency: String,
+    /// Token contract address — Solana SPL mint or ERC-20 address. Stored
+    /// verbatim from the envelope (no case normalization).
+    pub asset: String,
+    /// Receiving address.
+    pub recipient: String,
+    /// Base-unit integer string (no decimals applied).
+    pub amount_raw: String,
+    /// `amount_raw / 10^decimals`, or `None` if the token's decimals aren't
+    /// known to pay (so callers don't read a 0.0 fallback as "free").
+    pub price_usd: Option<f64>,
 }
 
 /// Result of probing a single endpoint.
@@ -213,33 +311,46 @@ pub fn extract_paid_endpoint(headers: &[(String, String)], body: Option<&str>) -
         .or_else(|| parse_payment_required_header(headers));
 
     if let Some(json) = &parsed_body {
-        // Walk accepts[] for Solana entries.
-        let mut found_x402_solana = false;
+        // Walk accepts[] for every indexable (Solana or EVM stable) entry —
+        // Phase 15 broadened this from Solana-only. Each match also pushes a
+        // `ChainOffer` so downstream tooling can render per-chain options.
+        let mut found_x402_offer = false;
         if let Some(accepts) = json.get("accepts").and_then(|v| v.as_array()) {
             for accept in accepts {
                 let network = accept.get("network").and_then(|v| v.as_str()).unwrap_or("");
-                if !is_solana_network(network) {
-                    continue;
-                }
                 let asset = accept.get("asset").and_then(|v| v.as_str()).unwrap_or("");
-                let symbol = normalize_currency(asset);
-                if !is_usd_stable(&symbol) {
+                let Some((caip2, symbol, decimals)) = resolve_offer(network, asset) else {
                     continue;
-                }
-                found_x402_solana = true;
-                push_unique(&mut paid.supported_usd, &symbol);
+                };
 
                 let amount_str = accept.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
-                let decimals = decimals_for(&symbol);
-                if let Some(usd) = amount_to_usd(amount_str, decimals) {
+                let recipient = accept
+                    .get("payTo")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let price_usd = amount_to_usd(amount_str, decimals);
+
+                paid.chain_offers.push(ChainOffer {
+                    network: caip2,
+                    currency: symbol.clone(),
+                    asset: asset.to_string(),
+                    recipient: recipient.clone(),
+                    amount_raw: amount_str.to_string(),
+                    price_usd,
+                });
+
+                found_x402_offer = true;
+                push_unique(&mut paid.supported_usd, &symbol);
+                if let Some(usd) = price_usd {
                     update_canonical_price(&mut paid.price_usd, usd, &symbol);
                 }
-                if let Some(pay_to) = accept.get("payTo").and_then(|v| v.as_str()) {
-                    push_unique(&mut paid.recipients, pay_to);
+                if !recipient.is_empty() {
+                    push_unique(&mut paid.recipients, &recipient);
                 }
             }
         }
-        if found_x402_solana {
+        if found_x402_offer {
             push_unique(&mut paid.protocols, "x402");
         }
 
@@ -272,7 +383,7 @@ pub fn extract_paid_endpoint(headers: &[(String, String)], body: Option<&str>) -
             .get("accepts")
             .map(|v| v.as_array().is_some_and(|a| a.is_empty()))
             .unwrap_or(true);
-        if has_siwx && no_payment_options && !found_x402_solana {
+        if has_siwx && no_payment_options && !found_x402_offer {
             paid.siwx_required = true;
         }
     }
@@ -296,12 +407,24 @@ pub fn extract_paid_endpoint(headers: &[(String, String)], body: Option<&str>) -
         push_unique(&mut paid.supported_usd, &symbol);
 
         let decimals = decimals_for(&symbol);
-        if let Some(usd) = amount_to_usd(&request.amount, decimals) {
+        let price_usd = amount_to_usd(&request.amount, decimals);
+        if let Some(usd) = price_usd {
             update_canonical_price(&mut paid.price_usd, usd, &symbol);
         }
-        if let Some(rcpt) = request.recipient.as_deref() {
-            push_unique(&mut paid.recipients, rcpt);
+        let recipient = request.recipient.clone().unwrap_or_default();
+        if !recipient.is_empty() {
+            push_unique(&mut paid.recipients, &recipient);
         }
+        // Phase 15: MPP is Solana-only; surface the offer alongside x402
+        // entries so downstream consumers see a unified per-chain list.
+        paid.chain_offers.push(ChainOffer {
+            network: solana_x402::exact::SOLANA_MAINNET.to_string(),
+            currency: symbol.clone(),
+            asset: request.currency.clone(),
+            recipient,
+            amount_raw: request.amount.clone(),
+            price_usd,
+        });
         if mpp_description.is_none() {
             mpp_description = request
                 .description
@@ -518,25 +641,60 @@ fn classify_outcome(outcome: RunOutcome, accepted: &[String]) -> ProbeStatus {
         }
 
         RunOutcome::X402Challenge { challenge, .. } => {
-            let currency = normalize_currency(&challenge.requirements.currency);
-            let network = challenge
-                .requirements
-                .cluster
-                .clone()
-                .unwrap_or_else(|| "mainnet".into());
-            let recipient = challenge.requirements.recipient.clone();
+            // Phase 15: pick whichever indexable accept matches the user's
+            // build configuration first — EVM-first when the `evm` feature
+            // is enabled (since the user explicitly opted in), Solana
+            // otherwise. `paid.chain_offers` still carries every option, so
+            // this only chooses the "primary display" for legacy flat
+            // consumers of `ProbeStatus::Ok`.
+            let candidates: &[_] = if challenge.all_accepts.is_empty() {
+                std::slice::from_ref(&challenge.requirements)
+            } else {
+                &challenge.all_accepts
+            };
+            let chosen = match pick_indexable_x402(candidates) {
+                Some(r) => r,
+                None => {
+                    return ProbeStatus::WrongChain {
+                        details: format!(
+                            "x402 envelope has no indexable accepts: {}",
+                            candidates
+                                .iter()
+                                .map(|r| r.network.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    };
+                }
+            };
 
-            if !accepted.iter().any(|a| a.eq_ignore_ascii_case(&currency)) {
+            // Normalize via `resolve_offer` so the displayed network is
+            // always CAIP-2 — Solana entries that arrived as `"mainnet-beta"`
+            // get pinned to the canonical genesis-hash form.
+            let (caip2, symbol, _) = match resolve_offer(&chosen.network, &chosen.currency) {
+                Some(t) => t,
+                None => (
+                    chosen
+                        .cluster
+                        .clone()
+                        .unwrap_or_else(|| chosen.network.clone()),
+                    normalize_currency(&chosen.currency),
+                    decimals_for(&normalize_currency(&chosen.currency)),
+                ),
+            };
+            let recipient = chosen.recipient.clone();
+
+            if !accepted.iter().any(|a| a.eq_ignore_ascii_case(&symbol)) {
                 return ProbeStatus::WrongCurrency {
-                    got: currency,
+                    got: symbol,
                     accepted: accepted.to_vec(),
                 };
             }
 
             ProbeStatus::Ok {
                 protocol: "x402".into(),
-                currency,
-                network,
+                currency: symbol,
+                network: caip2,
                 recipient,
             }
         }
@@ -715,7 +873,35 @@ mod tests {
     }
 
     #[test]
-    fn extract_skips_base_only_accepts() {
+    #[cfg(feature = "evm")]
+    fn extract_indexes_base_only_accepts_under_evm_feature() {
+        // Phase 15: an EVM-only x402 envelope (Base USDC) is now indexable;
+        // it shows up in `chain_offers` with the eip155 CAIP-2 network and
+        // populates the legacy flat fields too. Solana-only builds skip
+        // EVM entries naturally (the `#[cfg]` here makes that explicit).
+        let body = x402_body(vec![serde_json::json!({
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x0000000000000000000000000000000000000001",
+        })]);
+        let paid = extract_paid_endpoint(&[], Some(&body));
+        assert_eq!(paid.protocols, vec!["x402".to_string()]);
+        assert_eq!(paid.supported_usd, vec!["USDC".to_string()]);
+        assert_eq!(paid.price_usd, Some(0.01));
+        assert_eq!(paid.chain_offers.len(), 1);
+        let offer = &paid.chain_offers[0];
+        assert_eq!(offer.network, "eip155:8453");
+        assert_eq!(offer.currency, "USDC");
+        assert_eq!(offer.amount_raw, "10000");
+    }
+
+    #[test]
+    #[cfg(not(feature = "evm"))]
+    fn extract_skips_base_only_accepts_in_solana_only_build() {
+        // Without the `evm` feature the reverse-lookup table doesn't exist,
+        // so EVM accepts are silently skipped (same outcome as pre-Phase-15).
         let body = x402_body(vec![serde_json::json!({
             "scheme": "exact",
             "network": "eip155:8453",
@@ -727,6 +913,7 @@ mod tests {
         assert!(paid.protocols.is_empty());
         assert!(paid.supported_usd.is_empty());
         assert_eq!(paid.price_usd, None);
+        assert!(paid.chain_offers.is_empty());
     }
 
     #[test]
@@ -859,5 +1046,191 @@ mod tests {
         assert_eq!(amount_to_usd("1000000", 6), Some(1.0));
         assert_eq!(amount_to_usd("0", 6), Some(0.0));
         assert_eq!(amount_to_usd("not a number", 6), None);
+    }
+
+    // ── Phase 15 — multi-chain index publication ─────────────────────────
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn extract_merges_solana_and_evm_offers_into_chain_offers() {
+        // A multichain endpoint advertising Solana USDC + Base USDC should
+        // produce two chain_offers (one per network) but a single union
+        // `supported_usd` and the cheaper price as the canonical flat
+        // `price_usd`. Legacy flat fields stay populated for back-compat.
+        let body = x402_body(vec![
+            serde_json::json!({
+                "scheme": "exact",
+                "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                "amount": "20000",
+                "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "payTo": "SolanaRecipient",
+            }),
+            serde_json::json!({
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "amount": "10000",
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "payTo": "0x0000000000000000000000000000000000000001",
+            }),
+        ]);
+        let paid = extract_paid_endpoint(&[], Some(&body));
+        assert_eq!(paid.protocols, vec!["x402".to_string()]);
+        assert_eq!(paid.supported_usd, vec!["USDC".to_string()]);
+        assert_eq!(paid.price_usd, Some(0.01)); // Base 0.01 < Solana 0.02
+        assert_eq!(paid.chain_offers.len(), 2);
+        assert!(paid
+            .chain_offers
+            .iter()
+            .any(|o| o.network.starts_with("solana:") && o.amount_raw == "20000"));
+        assert!(paid
+            .chain_offers
+            .iter()
+            .any(|o| o.network == "eip155:8453" && o.amount_raw == "10000"));
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn extract_skips_unknown_evm_token() {
+        // A random ERC-20 address we don't know shouldn't pollute the index
+        // — chain_offers stays empty, no protocol claimed.
+        let body = x402_body(vec![serde_json::json!({
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0xDEADBEEF00000000000000000000000000000000",
+            "payTo": "0x0000000000000000000000000000000000000001",
+        })]);
+        let paid = extract_paid_endpoint(&[], Some(&body));
+        assert!(paid.chain_offers.is_empty());
+        assert!(paid.protocols.is_empty());
+        assert!(paid.supported_usd.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn classify_outcome_accepts_evm_only_x402_when_stable_known() {
+        // Pre-Phase-15 this returned `WrongChain`; Phase 15 indexes it as
+        // `Ok` with the eip155 CAIP-2 surfaced via `network`.
+        use crate::client::runner::RunOutcome;
+        use solana_x402::exact::PaymentRequirements;
+        let req = PaymentRequirements {
+            network: "eip155:8453".to_string(),
+            cluster: None,
+            recipient: "0x0000000000000000000000000000000000000001".to_string(),
+            amount: "10000".to_string(),
+            currency: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
+            decimals: Some(6),
+            token_program: None,
+            resource: "https://example.com/r".to_string(),
+            description: None,
+            max_age: Some(300),
+            recent_blockhash: None,
+            fee_payer: None,
+            fee_payer_key: None,
+            extra: None,
+            accepted: None,
+            resource_info: None,
+        };
+        let challenge = crate::client::x402::Challenge {
+            x402_version: 2,
+            requirements: req.clone(),
+            all_accepts: vec![req.clone()],
+            siwx: None,
+        };
+        let outcome = RunOutcome::X402Challenge {
+            challenge: Box::new(challenge),
+            resource_url: "https://example.com/r".to_string(),
+        };
+        let status = classify_outcome(outcome, &["USDC".to_string()]);
+        match status {
+            ProbeStatus::Ok {
+                protocol,
+                currency,
+                network,
+                ..
+            } => {
+                assert_eq!(protocol, "x402");
+                assert_eq!(currency, "USDC");
+                assert_eq!(network, "eip155:8453");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn classify_outcome_prefers_evm_when_envelope_offers_both() {
+        // EVM-first under `cfg(feature = "evm")` — when an envelope offers
+        // both Solana and Base, the probe surfaces the Base entry as the
+        // primary `ProbeStatus::Ok::network`.
+        use crate::client::runner::RunOutcome;
+        use solana_x402::exact::PaymentRequirements;
+        let solana_req = PaymentRequirements {
+            network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
+            cluster: None,
+            recipient: "SolanaRecipient".to_string(),
+            amount: "10000".to_string(),
+            currency: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            decimals: Some(6),
+            token_program: None,
+            resource: "r".into(),
+            description: None,
+            max_age: Some(300),
+            recent_blockhash: None,
+            fee_payer: None,
+            fee_payer_key: None,
+            extra: None,
+            accepted: None,
+            resource_info: None,
+        };
+        let evm_req = PaymentRequirements {
+            network: "eip155:8453".to_string(),
+            cluster: None,
+            recipient: "0x0000000000000000000000000000000000000001".to_string(),
+            amount: "10000".to_string(),
+            currency: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
+            decimals: Some(6),
+            token_program: None,
+            resource: "r".into(),
+            description: None,
+            max_age: Some(300),
+            recent_blockhash: None,
+            fee_payer: None,
+            fee_payer_key: None,
+            extra: None,
+            accepted: None,
+            resource_info: None,
+        };
+        let challenge = crate::client::x402::Challenge {
+            x402_version: 2,
+            requirements: solana_req.clone(),
+            all_accepts: vec![solana_req, evm_req],
+            siwx: None,
+        };
+        let outcome = RunOutcome::X402Challenge {
+            challenge: Box::new(challenge),
+            resource_url: "r".into(),
+        };
+        let status = classify_outcome(outcome, &["USDC".to_string()]);
+        match status {
+            ProbeStatus::Ok { network, .. } => {
+                assert_eq!(network, "eip155:8453", "EVM build must surface EVM entry first");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paid_endpoint_serde_omits_empty_chain_offers() {
+        // Back-compat: index files written before Phase 15 are
+        // `chain_offers`-less. Serializing a PaidEndpoint with no offers
+        // must NOT emit the field, so the on-disk schema stays the same
+        // for endpoints that have no payment options to advertise.
+        let paid = PaidEndpoint::default();
+        let json = serde_json::to_string(&paid).expect("serialize");
+        assert!(
+            !json.contains("chain_offers"),
+            "empty chain_offers should be skipped, got: {json}"
+        );
     }
 }

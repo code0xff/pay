@@ -409,7 +409,7 @@ async fn rpc_call(
 #[cfg(feature = "evm")]
 pub use evm_balances::{
     evm_default_rpc_url, evm_rpc_url, evm_stablecoin_address, evm_stablecoin_decimals,
-    get_evm_balances,
+    evm_symbol_for, get_evm_balances,
 };
 
 #[cfg(feature = "evm")]
@@ -476,6 +476,50 @@ mod evm_balances {
             ("base-sepolia", "USDC") => Some("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
             _ => None,
         }
+    }
+
+    /// (slug, chain_id) pairs the forward stablecoin-address table covers.
+    /// Kept local to balance.rs so the reverse lookup below stays a closed
+    /// table — adding a new chain here forces you to add it to
+    /// `evm_stablecoin_address` too (and vice versa).
+    const EVM_NETWORKS: &[(&str, u64)] = &[
+        ("ethereum", 1),
+        ("base", 8453),
+        ("optimism", 10),
+        ("arbitrum", 42161),
+        ("sepolia", 11155111),
+        ("base-sepolia", 84532),
+    ];
+
+    /// Symbols enumerated when building the reverse lookup. Matches the
+    /// branches in `evm_stablecoin_address`/`evm_stablecoin_decimals`.
+    const EVM_STABLE_SYMBOLS: &[&str] = &["USDC", "USDT"];
+
+    /// Reverse of `evm_stablecoin_address`: given `(chain_id, ERC-20 address)`,
+    /// return the canonical symbol (`"USDC"`, `"USDT"`) if we recognize it.
+    ///
+    /// Built once via `OnceLock` from the forward table — keeps the symbol
+    /// list as a single source of truth and avoids per-call inversion cost
+    /// during `skills::probe::extract_paid_endpoint`.
+    pub fn evm_symbol_for(chain_id: u64, address: &str) -> Option<&'static str> {
+        use std::collections::HashMap;
+        use std::sync::OnceLock;
+        static LOOKUP: OnceLock<HashMap<(u64, Address), &'static str>> = OnceLock::new();
+        let table = LOOKUP.get_or_init(|| {
+            let mut m = HashMap::new();
+            for (slug, chain_id) in EVM_NETWORKS {
+                for sym in EVM_STABLE_SYMBOLS {
+                    if let Some(addr_str) = evm_stablecoin_address(slug, sym)
+                        && let Ok(addr) = Address::from_str(addr_str)
+                    {
+                        m.insert((*chain_id, addr), *sym);
+                    }
+                }
+            }
+            m
+        });
+        let parsed = Address::from_str(address).ok()?;
+        table.get(&(chain_id, parsed)).copied()
     }
 
     /// Fetch ETH + well-known ERC-20 stablecoin balances for an EVM address.
