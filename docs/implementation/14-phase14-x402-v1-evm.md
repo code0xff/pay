@@ -83,5 +83,28 @@ v1 EVM 스펙이 확인되고 크레이트가 컨트리뷰션을 받는다면:
 
 ## 우선순위
 
-P3 — 현재 운영 중인 EVM x402 서버는 대부분 v2를 사용한다. v1 EVM 서버를 실제로
-마주치는 상황이 발생할 때 이 Phase를 착수한다.
+~~P3~~ — Phase 19 시점에 구현 완료.
+
+## 구현 결과
+
+`x402-chain-eip155 1.4.6` 의 `V1Eip155ExactClient` 가 v2 클라이언트와
+동일한 인터페이스를 제공한다는 사실이 사전조사에서 확인되어, **옵션 A
+(공식 SDK 그대로 사용)** 로 진행했다.
+
+`client::evm::sign_evm_payment` 에 `version: u64` 인자를 추가하고
+`X402_VERSION_V1` 이면 `V1Eip155ExactClient` + `v1::PaymentRequired`
+envelope 으로 분기. `build_evm_payment` 의 결과 header 도 `X402_V1_PAYMENT_HEADER`
+(`X-Payment`) 로 바뀐다.
+
+v1 envelope 은 v2 와 두 가지가 다르다:
+1. `network` 필드가 CAIP-2 (`eip155:8453`) 가 아니라 SDK 의 short name
+   (`base`) 이어야 한다 — `ChainId::as_network_name()` 으로 변환.
+2. `amount` 가 아니라 `maxAmountRequired` 이고, `resource`/`description`
+   필드를 envelope 안에 직접 가져야 한다.
+
+이 변환은 `v1_envelope_reshape` 헬퍼로 캡슐화되어 있어 v2 경로에는 영향
+없음.
+
+테스트: `build_evm_payment_v1_emits_x_payment_header` (base-sepolia 기준
+— Ethereum Sepolia 는 x402-types short name 테이블에 없음),
+`build_evm_payment_rejects_unknown_x402_version`.
