@@ -172,6 +172,7 @@ impl Command {
         keypair_override: Option<&str>,
         network_override: Option<&str>,
         account_override: Option<&str>,
+        currency_override: Option<&str>,
         verbose: bool,
         sandbox: bool,
     ) -> pay_core::Result<()> {
@@ -228,6 +229,7 @@ impl Command {
                     Some(parsed_headers),
                     network_override,
                     account_override,
+                    currency_override,
                     sandbox,
                     verbose,
                 );
@@ -244,6 +246,7 @@ impl Command {
             None,
             network_override,
             account_override,
+            currency_override,
             sandbox,
             verbose,
         )
@@ -260,6 +263,7 @@ fn handle_outcome(
     fetch_headers: Option<Vec<(String, String)>>,
     network_override: Option<&str>,
     account_override: Option<&str>,
+    currency_override: Option<&str>,
     sandbox: bool,
     verbose: bool,
 ) -> pay_core::Result<()> {
@@ -308,6 +312,7 @@ fn handle_outcome(
                         fetch_headers,
                         network_override,
                         account_override,
+                        currency_override,
                         verbose,
                     },
                 );
@@ -428,6 +433,7 @@ fn handle_outcome(
                         fetch_headers,
                         network_override,
                         account_override,
+                        currency_override,
                         verbose,
                     },
                 );
@@ -475,6 +481,7 @@ fn handle_outcome(
                         fetch_headers,
                         network_override,
                         account_override,
+                        currency_override,
                         verbose,
                     },
                 );
@@ -714,6 +721,10 @@ struct PaymentRetryContext<'a, 'tool> {
     fetch_headers: Option<Vec<(String, String)>>,
     network_override: Option<&'a str>,
     account_override: Option<&'a str>,
+    /// Phase 18: CLI `--currency` override forwarded to
+    /// `x402::build_payment`. `None` keeps the default USDC > USDT
+    /// preference.
+    currency_override: Option<&'a str>,
     verbose: bool,
 }
 
@@ -842,6 +853,7 @@ fn pay_x402_and_retry(
         ctx.network_override,
         ctx.account_override,
         Some(resource_url),
+        ctx.currency_override,
     )?;
 
     if let Some(resolved) = built_payment.ephemeral_notice {

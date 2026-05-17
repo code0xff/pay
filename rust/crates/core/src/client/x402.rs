@@ -131,12 +131,13 @@ pub fn build_payment(
     network_override: Option<&str>,
     account_override: Option<&str>,
     resource_url: Option<&str>,
+    currency_override: Option<&str>,
 ) -> Result<BuiltPayment> {
     // Re-pick the right `accepts` entry for the wallet/override; falls back
     // to the parser's default (`challenge.requirements`) when the envelope
     // didn't carry alternatives or none match.
     let requirements = if !challenge.all_accepts.is_empty() {
-        select_best_chain(&challenge.all_accepts, store, network_override)
+        select_best_chain(&challenge.all_accepts, store, network_override, currency_override)
             .unwrap_or(&challenge.requirements)
     } else {
         &challenge.requirements
@@ -323,74 +324,168 @@ fn build_siwx_header(
     Ok(Some((SIGN_IN_WITH_X_HEADER, header)))
 }
 
-/// Select the best `PaymentRequirements` entry from a multi-chain `accepts`
-/// list.
+/// Select the best `PaymentRequirements` entry from a multi-chain
+/// (and optionally multi-currency) `accepts` list.
 ///
-/// Priority (first match wins):
-///   1. `network_override` (CLI `--network`) — pick the entry whose
-///      normalized network slug or `cluster` field matches.
-///   2. First entry whose normalized network has *any* account configured
-///      in `accounts.yml` (not just the literal `default` name — users may
-///      register a wallet under any name they like).
-///   3. **EVM-first** (`cfg(feature = "evm")` only): first EVM entry. The
+/// The function works as a series of *narrowing* filters: at each chain
+/// priority step the candidate set is reduced, and the final
+/// currency-aware tiebreak picks one entry from the survivors. A filter
+/// that would empty the set is skipped (so a priority never throws away
+/// every option).
+///
+/// Chain priority (each step reduces the candidate set):
+///   1. `network_override` (CLI `--network`) — keep entries whose
+///      normalized network slug or `cluster` matches.
+///   2. Entries whose normalized network has *any* account configured
+///      in `accounts.yml`.
+///   3. **EVM-first** (`cfg(feature = "evm")` only): EVM entries. The
 ///      user opted into EVM at build time so EVM is the default routing
 ///      target when nothing more specific matched.
-///   4. First non-EVM entry (Solana preference — covers the Solana-only
+///   4. Non-EVM entries (Solana preference — covers the Solana-only
 ///      build and the "no accounts at all" first-run case).
-///   5. First entry overall.
+///   5. All remaining entries.
+///
+/// Currency tiebreak (applied within the priority-step's survivors):
+///   - `currency_override` (CLI `--currency`) — pick that symbol when at
+///     least one survivor matches.
+///   - Otherwise pick the lowest [`currency_preference`] (USDC > USDT >
+///     others), preserving accept order within ties.
 pub fn select_best_chain<'a>(
     accepts: &'a [PaymentRequirements],
     store: &dyn AccountsStore,
     network_override: Option<&str>,
+    currency_override: Option<&str>,
 ) -> Option<&'a PaymentRequirements> {
     if accepts.is_empty() {
         return None;
     }
 
-    if let Some(override_slug) = network_override
-        && let Some(r) = accepts.iter().find(|r| {
-            normalize_network(&r.network) == override_slug
-                || normalize_network(r.cluster.as_deref().unwrap_or("")) == override_slug
-        })
-    {
-        return Some(r);
+    let pick_by_currency = |candidates: Vec<&'a PaymentRequirements>| -> Option<&'a PaymentRequirements> {
+        if candidates.is_empty() {
+            return None;
+        }
+        if let Some(want) = currency_override
+            && let Some(r) = candidates.iter().find(|r| {
+                currency_symbol_for(r)
+                    .map(|s| s.eq_ignore_ascii_case(want))
+                    .unwrap_or(false)
+            })
+        {
+            return Some(*r);
+        }
+        candidates
+            .into_iter()
+            .min_by_key(|r| {
+                currency_symbol_for(r)
+                    .map(|s| currency_preference(&s))
+                    .unwrap_or(u8::MAX)
+            })
+    };
+
+    if let Some(override_slug) = network_override {
+        let matches: Vec<_> = accepts
+            .iter()
+            .filter(|r| {
+                normalize_network(&r.network) == override_slug
+                    || normalize_network(r.cluster.as_deref().unwrap_or("")) == override_slug
+            })
+            .collect();
+        if !matches.is_empty() {
+            return pick_by_currency(matches);
+        }
     }
 
     let file = store.load().ok();
 
-    if let Some(file) = &file
-        && let Some(r) = accepts.iter().find(|r| {
-            let slug = normalize_network(&r.network);
-            file.account_for_network(&slug).is_some()
-        })
-    {
-        return Some(r);
-    }
-
-    // EVM-first dispatch under cfg(feature = "evm"): the user opted into
-    // EVM at build time, so when no per-account/network match steered us
-    // above this point, route to EVM by default. Solana-only builds skip
-    // this branch entirely and fall through to the Solana preference.
-    #[cfg(feature = "evm")]
-    {
-        let _ = &file;
-        if let Some(r) = accepts.iter().find(|r| {
-            let slug = normalize_network(&r.network);
-            crate::accounts::is_evm_network_family(&slug)
-        }) {
-            return Some(r);
+    if let Some(file) = &file {
+        let matches: Vec<_> = accepts
+            .iter()
+            .filter(|r| {
+                let slug = normalize_network(&r.network);
+                file.account_for_network(&slug).is_some()
+            })
+            .collect();
+        if !matches.is_empty() {
+            return pick_by_currency(matches);
         }
     }
 
-    if let Some(r) = accepts.iter().find(|r| {
-        let slug = normalize_network(&r.network);
-        !crate::accounts::is_evm_network_family(&slug)
-    }) {
-        return Some(r);
+    #[cfg(feature = "evm")]
+    {
+        let matches: Vec<_> = accepts
+            .iter()
+            .filter(|r| {
+                let slug = normalize_network(&r.network);
+                crate::accounts::is_evm_network_family(&slug)
+            })
+            .collect();
+        if !matches.is_empty() {
+            return pick_by_currency(matches);
+        }
+    }
+
+    let matches: Vec<_> = accepts
+        .iter()
+        .filter(|r| {
+            let slug = normalize_network(&r.network);
+            !crate::accounts::is_evm_network_family(&slug)
+        })
+        .collect();
+    if !matches.is_empty() {
+        return pick_by_currency(matches);
     }
 
     let _ = &file;
-    accepts.first()
+    pick_by_currency(accepts.iter().collect())
+}
+
+/// Sort key for currency selection inside [`select_best_chain`].
+///
+/// Lower means more preferred. USDC is the de-facto standard; USDT is
+/// the common backup; everything else sorts last in alphabetical order
+/// of how the SDK happened to emit them (since `min_by_key` is stable).
+fn currency_preference(symbol: &str) -> u8 {
+    match symbol.to_ascii_uppercase().as_str() {
+        "USDC" => 0,
+        "USDT" => 1,
+        _ => 99,
+    }
+}
+
+/// Best-effort symbol lookup for a `PaymentRequirements.currency`. Maps
+/// known Solana SPL mints + EVM ERC-20 addresses to their ticker.
+/// Returns `None` when the asset isn't a recognized stablecoin so the
+/// caller can fall back to the SDK-provided order rather than a
+/// guess-and-pick that might pick the wrong asset.
+fn currency_symbol_for(r: &PaymentRequirements) -> Option<String> {
+    #[cfg(feature = "evm")]
+    {
+        if let Some(chain_id_str) = r.network.strip_prefix("eip155:")
+            && let Ok(chain_id) = chain_id_str.parse::<u64>()
+            && let Some(sym) = crate::client::balance::evm_symbol_for(chain_id, &r.currency)
+        {
+            return Some(sym.to_string());
+        }
+    }
+    use pay_types::stablecoin_mints::{
+        PYUSD_DEVNET, PYUSD_MAINNET, USDC_DEVNET, USDC_MAINNET, USDT_MAINNET,
+    };
+    let s = r.currency.as_str();
+    if s == USDC_MAINNET || s == USDC_DEVNET {
+        return Some("USDC".to_string());
+    }
+    if s == USDT_MAINNET {
+        return Some("USDT".to_string());
+    }
+    if s == PYUSD_MAINNET || s == PYUSD_DEVNET {
+        return Some("PYUSD".to_string());
+    }
+    // Some servers ship the ticker directly in `currency` (legacy/dev
+    // configs). Treat any short non-empty value as already a symbol.
+    if !s.is_empty() && s.len() <= 8 {
+        return Some(s.to_uppercase());
+    }
+    None
 }
 
 /// Normalize CAIP-2 network identifiers to the slugs pay uses internally.
@@ -1097,7 +1192,7 @@ mod tests {
             siwx: None,
         };
 
-        let err = build_payment(&challenge, &store, Some("localnet"), None, None).unwrap_err();
+        let err = build_payment(&challenge, &store, Some("localnet"), None, None, None).unwrap_err();
         let msg = err.to_string();
 
         assert!(msg.contains("you forced network `localnet`"));
@@ -1119,7 +1214,7 @@ mod tests {
             siwx: None,
         };
 
-        let err = build_payment(&challenge, &store, None, None, None).unwrap_err();
+        let err = build_payment(&challenge, &store, None, None, None, None).unwrap_err();
         let msg = err.to_string();
 
         assert!(msg.contains("No account configured for network `mainnet`"));
@@ -1137,7 +1232,7 @@ mod tests {
             all_accepts: vec![],
             siwx: None,
         };
-        let err = build_payment(&challenge, &store, None, Some("alice"), None).unwrap_err();
+        let err = build_payment(&challenge, &store, None, Some("alice"), None, None).unwrap_err();
         let msg = err.to_string();
 
         assert!(msg.contains("No account named `alice` configured for network `mainnet`"));
@@ -1192,7 +1287,7 @@ mod tests {
         // not exercised here.
         let store = MemoryAccountsStore::new();
         let accepts = vec![solana_accept(), evm_accept()];
-        let chosen = select_best_chain(&accepts, &store, None).expect("pick");
+        let chosen = select_best_chain(&accepts, &store, None, None).expect("pick");
         assert_eq!(chosen.network, "eip155:8453");
     }
 
@@ -1226,7 +1321,7 @@ mod tests {
         );
         let store = MemoryAccountsStore::with_file(file);
         let accepts = vec![evm_accept(), solana_accept()];
-        let chosen = select_best_chain(&accepts, &store, None).expect("pick");
+        let chosen = select_best_chain(&accepts, &store, None, None).expect("pick");
         assert!(
             chosen.network.starts_with("solana:"),
             "configured Solana account must outrank EVM-first default; got {}",
@@ -1241,7 +1336,7 @@ mod tests {
         // doesn't shadow an explicit Solana choice.
         let store = MemoryAccountsStore::new();
         let accepts = vec![solana_accept(), evm_accept()];
-        let chosen = select_best_chain(&accepts, &store, Some("mainnet")).expect("pick");
+        let chosen = select_best_chain(&accepts, &store, Some("mainnet"), None).expect("pick");
         assert!(chosen.network.starts_with("solana:"));
     }
 
@@ -1253,7 +1348,111 @@ mod tests {
         // preference. (Mirrors pre-Phase-16 behaviour.)
         let store = MemoryAccountsStore::new();
         let accepts = vec![evm_accept(), solana_accept()];
-        let chosen = select_best_chain(&accepts, &store, None).expect("pick");
+        let chosen = select_best_chain(&accepts, &store, None, None).expect("pick");
         assert!(chosen.network.starts_with("solana:"));
+    }
+
+    // ── Phase 18 — currency selection ────────────────────────────────────
+
+    fn evm_accept_with(asset: &str) -> PaymentRequirements {
+        let mut r = evm_accept();
+        r.currency = asset.to_string();
+        r
+    }
+
+    #[test]
+    fn currency_preference_orders_usdc_first() {
+        assert!(currency_preference("USDC") < currency_preference("USDT"));
+        assert!(currency_preference("USDT") < currency_preference("DAI"));
+        assert_eq!(currency_preference("usdc"), currency_preference("USDC"));
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn select_best_chain_prefers_usdc_over_usdt_by_default() {
+        // Same chain (Base), two currencies; with no --currency override the
+        // default order picks USDC even though USDT comes first in accepts.
+        let store = MemoryAccountsStore::new();
+        let usdt_first = vec![
+            evm_accept_with("0xdAC17F958D2ee523a2206206994597C13D831ec7"), // USDT mainnet
+            evm_accept_with("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), // USDC Base
+        ];
+        // USDT entry is eip155:8453 (per evm_accept_with) — currency address
+        // for Ethereum USDT but we don't validate cross-chain matching here.
+        // What matters: USDC sorts ahead of USDT in pick_by_currency.
+        let chosen = select_best_chain(&usdt_first, &store, None, None).expect("pick");
+        assert_eq!(
+            chosen.currency,
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "USDC must outrank USDT by default"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn select_best_chain_currency_override_wins_over_default() {
+        let store = MemoryAccountsStore::new();
+        // Both same chain (Base): USDC + a generic short ticker stand-in.
+        let accepts = vec![
+            evm_accept_with("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), // USDC
+            // Use a literal short ticker so currency_symbol_for returns "USDT"
+            // (the address-table for Base USDT isn't populated, but the
+            // short-string heuristic kicks in for direct ticker envelopes).
+            evm_accept_with("USDT"),
+        ];
+        let chosen = select_best_chain(&accepts, &store, None, Some("USDT")).expect("pick");
+        assert_eq!(chosen.currency, "USDT", "override must beat default USDC");
+    }
+
+    #[test]
+    #[cfg(feature = "evm")]
+    fn select_best_chain_currency_override_does_not_cross_chains() {
+        // User configured Solana wallet, override asks for USDT, but
+        // Solana entry uses USDC. The configured-account priority must
+        // still steer to Solana, then the override misses and the
+        // currency fallback picks the only Solana entry available.
+        let mut file = AccountsFile::default();
+        file.upsert(
+            "mainnet",
+            "default",
+            Account {
+                keystore: Keystore::Ephemeral,
+                active: true,
+                auth_required: Some(false),
+                pubkey: Some("SolanaRecipient".to_string()),
+                vault: None,
+                account: None,
+                path: None,
+                secret_key_b58: Some("ignored".to_string()),
+                chain_family: None,
+                secret_key_hex: None,
+                created_at: None,
+            },
+        );
+        let store = MemoryAccountsStore::with_file(file);
+        let mut sol = solana_accept();
+        sol.currency = pay_types::stablecoin_mints::USDC_MAINNET.to_string();
+        let mut evm = evm_accept();
+        evm.currency = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string();
+        let accepts = vec![evm, sol];
+        let chosen = select_best_chain(&accepts, &store, None, Some("USDT")).expect("pick");
+        assert!(
+            chosen.network.starts_with("solana:"),
+            "configured Solana account must outrank --currency override; got {}",
+            chosen.network
+        );
+    }
+
+    #[test]
+    fn select_best_chain_unknown_currency_falls_back_to_first_survivor() {
+        // accepts has only PYUSD on Solana; --currency USDC must not
+        // suppress it. Falls through to currency_preference (PYUSD = 99)
+        // and returns the single survivor.
+        let store = MemoryAccountsStore::new();
+        let mut entry = solana_accept();
+        entry.currency = pay_types::stablecoin_mints::PYUSD_MAINNET.to_string();
+        let accepts = vec![entry];
+        let chosen = select_best_chain(&accepts, &store, None, Some("USDC")).expect("pick");
+        assert_eq!(chosen.currency, pay_types::stablecoin_mints::PYUSD_MAINNET);
     }
 }

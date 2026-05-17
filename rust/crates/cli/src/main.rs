@@ -69,6 +69,13 @@ struct Opts {
     #[arg(long, global = true)]
     account: Option<String>,
 
+    /// Prefer this stablecoin (e.g. USDC, USDT) when the server advertises
+    /// multiple options. Defaults to USDC, falling back to USDT then any
+    /// other listed stable. Does not override chain selection — use
+    /// `--network` for that.
+    #[arg(long, global = true)]
+    currency: Option<String>,
+
     /// Launch the Payment Debugger proxy on port 1402. All MCP curl
     /// requests are routed through it, and the PDB UI is served at
     /// http://127.0.0.1:1402/
@@ -277,6 +284,7 @@ fn main() {
         keypair_override.as_deref(),
         network_override.as_deref(),
         opts.account.as_deref(),
+        opts.currency.as_deref(),
         verbose,
         sandbox_mode,
     ) {

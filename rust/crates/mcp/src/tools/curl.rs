@@ -248,6 +248,7 @@ fn do_paid_fetch(
                 network_override.as_deref(),
                 account_override.as_deref(),
                 Some(url),
+                None,
             )?;
             let mut headers = extra_headers.to_vec();
             headers.extend(
