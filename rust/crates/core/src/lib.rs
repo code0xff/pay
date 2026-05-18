@@ -6,6 +6,9 @@ pub mod instructions;
 pub mod keystore;
 pub mod signer;
 pub mod skills;
+// Phase 21: chain-neutral x402 protocol wire types (constants, structs,
+// parser). Solana payment building still uses the SDK in `solana_x402`.
+pub mod x402_proto;
 
 // Chain family abstraction (EVM unconditional, Solana variant gated).
 pub mod chain;
