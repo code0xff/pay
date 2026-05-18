@@ -1,21 +1,29 @@
 //! `pay send` — send stablecoins to a recipient.
 
+#[cfg(feature = "solana")]
 use std::str::FromStr;
 
+#[cfg(feature = "solana")]
 use dialoguer::{Select, theme::ColorfulTheme};
 use owo_colors::OwoColorize;
+#[cfg(feature = "solana")]
 use pay_core::accounts::{
     AccountChoice, AccountsFile, FileAccountsStore, MAINNET_NETWORK,
     load_or_create_ephemeral_for_network, load_or_create_ephemeral_for_network_as,
     resolve_account_for_network,
 };
+#[cfg(feature = "solana")]
 use pay_core::balance::AccountBalances;
+#[cfg(feature = "solana")]
 use pay_core::send::{STABLECOIN_DECIMALS, format_token_amount, parse_token_amount};
 use pay_types::Stablecoin;
+#[cfg(feature = "solana")]
 use solana_pubkey::Pubkey;
 
+#[cfg(feature = "solana")]
 use crate::{components, no_dna};
 
+#[cfg(feature = "solana")]
 const DEFAULT_STABLECOIN: Stablecoin = Stablecoin::Usdc;
 
 /// Send stablecoins to a recipient address.
@@ -64,6 +72,7 @@ impl SendCommand {
     ) -> pay_core::Result<()> {
         let amount = self.amount;
         let recipient_input = self.recipient;
+        #[cfg(feature = "solana")]
         let config = pay_core::Config::load().unwrap_or_default();
         let network = network_override.unwrap_or(pay_core::accounts::MAINNET_NETWORK);
 
@@ -83,6 +92,17 @@ impl SendCommand {
             );
         }
 
+        #[cfg(not(feature = "solana"))]
+        {
+            let _ = (amount, recipient_input, account_override, verbose);
+            return Err(pay_core::Error::Config(format!(
+                "`pay send --network {network}` targets a Solana network, but this `pay` binary \
+                 was built without the `solana` feature. Rebuild with \
+                 `cargo build -p pay --features solana`, or use `--network <evm-slug>`."
+            )));
+        }
+        #[cfg(feature = "solana")]
+        {
         let rpc_url = configured_rpc_url(&config);
         let fee_within = effective_fee_within(&amount, self.fee_within);
         let recipient = resolve_recipient_pubkey(&recipient_input, network)?;
@@ -131,7 +151,31 @@ impl SendCommand {
         );
 
         Ok(())
+        }
     }
+}
+
+/// Local copy of `pay_core::send::format_token_amount` used by the EVM
+/// path. The pay-core helper lives behind the `solana` feature, but the
+/// formatting itself is chain-neutral.
+fn format_token_amount_local(raw: u64, decimals: u8) -> String {
+    if decimals == 0 {
+        return raw.to_string();
+    }
+    let scale = 10_u64.pow(decimals as u32);
+    let whole = raw / scale;
+    let fraction = raw % scale;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let mut s = format!("{whole}.{:0width$}", fraction, width = decimals as usize);
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -186,7 +230,7 @@ fn run_evm_send(
             account_override,
         })?;
 
-    let amount_sent = pay_core::send::format_token_amount(
+    let amount_sent = format_token_amount_local(
         result.amount_raw.min(u64::MAX as u128) as u64,
         result.decimals,
     );
@@ -205,6 +249,7 @@ fn run_evm_send(
     Ok(())
 }
 
+#[cfg(feature = "solana")]
 fn send_success_title(result: &pay_core::client::send::SendResult) -> String {
     let amount_sent = format_token_amount(result.amount_raw, result.decimals);
     let title = format!("Sent {amount_sent} {} to {}", result.currency, result.to);
@@ -224,6 +269,7 @@ fn send_success_title(result: &pay_core::client::send::SendResult) -> String {
     title
 }
 
+#[cfg(feature = "solana")]
 fn send_success_body(result: &pay_core::client::send::SendResult) -> String {
     let explorer_cluster =
         crate::network::SolanaNetwork::from_slug(&result.network).explorer_cluster(&result.rpc_url);
@@ -234,10 +280,12 @@ fn send_success_body(result: &pay_core::client::send::SendResult) -> String {
     )
 }
 
+#[cfg(feature = "solana")]
 fn effective_fee_within(amount: &str, fee_within: bool) -> bool {
     fee_within || sends_entire_balance(amount)
 }
 
+#[cfg(feature = "solana")]
 fn resolve_memo(memo: Option<&str>, memo_hex: Option<&str>) -> pay_core::Result<Option<String>> {
     match (memo, memo_hex) {
         (Some(_), Some(_)) => Err(pay_core::Error::Config(
@@ -249,6 +297,7 @@ fn resolve_memo(memo: Option<&str>, memo_hex: Option<&str>) -> pay_core::Result<
     }
 }
 
+#[cfg(feature = "solana")]
 fn normalize_memo_text(value: &str) -> pay_core::Result<Option<String>> {
     let value = value.trim();
     if value.is_empty() {
@@ -258,6 +307,7 @@ fn normalize_memo_text(value: &str) -> pay_core::Result<Option<String>> {
     Ok(Some(value.to_string()))
 }
 
+#[cfg(feature = "solana")]
 fn decode_memo_hex(value: &str) -> pay_core::Result<Option<String>> {
     let value = value.trim();
     if value.is_empty() {
@@ -286,6 +336,7 @@ fn decode_memo_hex(value: &str) -> pay_core::Result<Option<String>> {
     normalize_memo_text(&memo)
 }
 
+#[cfg(feature = "solana")]
 fn hex_digit(byte: u8) -> pay_core::Result<u8> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
@@ -297,6 +348,7 @@ fn hex_digit(byte: u8) -> pay_core::Result<u8> {
     }
 }
 
+#[cfg(feature = "solana")]
 fn validate_memo_len(value: &str) -> pay_core::Result<()> {
     if value.len() > 566 {
         return Err(pay_core::Error::Config(
@@ -306,10 +358,12 @@ fn validate_memo_len(value: &str) -> pay_core::Result<()> {
     Ok(())
 }
 
+/// Chain-neutral "send everything" shorthand — used by both EVM and Solana.
 fn sends_entire_balance(amount: &str) -> bool {
     amount == "*" || amount.eq_ignore_ascii_case("max")
 }
 
+#[cfg(feature = "solana")]
 fn configured_rpc_url(config: &pay_core::Config) -> Option<&str> {
     config
         .rpc_url
@@ -317,6 +371,7 @@ fn configured_rpc_url(config: &pay_core::Config) -> Option<&str> {
         .filter(|url| !url.trim().is_empty())
 }
 
+#[cfg(feature = "solana")]
 fn resolve_recipient_pubkey(recipient: &str, network: &str) -> pay_core::Result<String> {
     if Pubkey::from_str(recipient).is_ok() {
         return Ok(recipient.to_string());
@@ -326,6 +381,7 @@ fn resolve_recipient_pubkey(recipient: &str, network: &str) -> pay_core::Result<
     resolve_recipient_pubkey_from_file(recipient, network, &file)
 }
 
+#[cfg(feature = "solana")]
 fn resolve_recipient_pubkey_from_file(
     recipient: &str,
     network: &str,
@@ -348,6 +404,7 @@ fn resolve_recipient_pubkey_from_file(
     )))
 }
 
+#[cfg(feature = "solana")]
 fn resolve_send_currency(
     amount: &str,
     requested_currency: Option<&str>,
@@ -397,6 +454,7 @@ fn resolve_send_currency(
     }
 }
 
+#[cfg(feature = "solana")]
 fn sender_pubkey_for_network(
     network: &str,
     account_override: Option<&str>,
@@ -432,6 +490,7 @@ fn sender_pubkey_for_network(
     }
 }
 
+#[cfg(feature = "solana")]
 fn balance_rpc_url(network: &str, rpc_url_override: Option<&str>) -> String {
     rpc_url_override
         .map(str::to_string)
@@ -445,6 +504,7 @@ fn balance_rpc_url(network: &str, rpc_url_override: Option<&str>) -> String {
         })
 }
 
+#[cfg(feature = "solana")]
 fn balances_for_sender(
     network: &str,
     rpc_url: &str,
@@ -463,11 +523,13 @@ fn balances_for_sender(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "solana")]
 struct EligibleStablecoin {
     currency: Stablecoin,
     balance: String,
 }
 
+#[cfg(feature = "solana")]
 fn eligible_stablecoins(
     balances: &AccountBalances,
     amount: &str,
@@ -502,6 +564,7 @@ fn eligible_stablecoins(
     Ok(eligible)
 }
 
+#[cfg(feature = "solana")]
 fn normalize_requested_currency(currency: &str) -> pay_core::Result<Stablecoin> {
     if currency.trim().is_empty() {
         return Err(pay_core::Error::Config(
@@ -511,10 +574,12 @@ fn normalize_requested_currency(currency: &str) -> pay_core::Result<Stablecoin> 
     Stablecoin::from_str(currency).map_err(pay_core::Error::Config)
 }
 
+#[cfg(feature = "solana")]
 fn can_prompt() -> bool {
     !no_dna::is_agent() && std::io::IsTerminal::is_terminal(&std::io::stderr())
 }
 
+#[cfg(feature = "solana")]
 fn prompt_for_stablecoin(eligible: &[EligibleStablecoin]) -> pay_core::Result<Stablecoin> {
     let labels = eligible
         .iter()
@@ -529,6 +594,7 @@ fn prompt_for_stablecoin(eligible: &[EligibleStablecoin]) -> pay_core::Result<St
     Ok(eligible[selection].currency)
 }
 
+#[cfg(feature = "solana")]
 fn eligible_summary(eligible: &[EligibleStablecoin]) -> String {
     eligible
         .iter()
@@ -537,6 +603,7 @@ fn eligible_summary(eligible: &[EligibleStablecoin]) -> String {
         .join(", ")
 }
 
+#[cfg(feature = "solana")]
 fn multiple_eligible_stablecoins_message(amount: &str, eligible: &[EligibleStablecoin]) -> String {
     format!(
         "Multiple stablecoin balances can cover {amount}.\n\
@@ -546,6 +613,7 @@ fn multiple_eligible_stablecoins_message(amount: &str, eligible: &[EligibleStabl
     )
 }
 
+#[cfg(feature = "solana")]
 fn no_eligible_stablecoin_message(amount: &str, balances: &AccountBalances) -> String {
     let balances = stablecoin_balance_summary(balances);
     if sends_entire_balance(amount) {
@@ -563,6 +631,7 @@ fn no_eligible_stablecoin_message(amount: &str, balances: &AccountBalances) -> S
     }
 }
 
+#[cfg(feature = "solana")]
 fn stablecoin_balance_summary(balances: &AccountBalances) -> String {
     balances
         .tokens

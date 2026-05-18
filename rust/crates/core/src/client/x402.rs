@@ -731,7 +731,7 @@ fn x402_version_from_json(body: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::accounts::{Account, AccountsFile, Keystore, MemoryAccountsStore};
-    use solana_x402::exact::EXACT_SCHEME;
+    use crate::x402_proto::EXACT_SCHEME;
 
     fn sample_requirements() -> PaymentRequirements {
         PaymentRequirements {
@@ -914,6 +914,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn parse_v2_payment_required_header_captures_siwx_extension() {
         let selected = serde_json::json!({
@@ -967,6 +968,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn parse_siwx_auth_reads_auth_only_challenge() {
         let payment_required = serde_json::json!({
@@ -1003,6 +1005,7 @@ mod tests {
         assert!(parse(&headers, None).is_none());
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn parse_siwx_auth_reads_auth_only_body() {
         let body = serde_json::json!({
@@ -1030,6 +1033,7 @@ mod tests {
         assert_eq!(challenge.extension.nonce, "nonce-from-body");
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn parse_siwx_auth_ignores_payment_challenges() {
         let selected = serde_json::json!({
@@ -1068,6 +1072,7 @@ mod tests {
         assert!(parse(&headers, None).unwrap().siwx.is_some());
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn parse_payment_challenge_survives_malformed_siwx_extension() {
         let selected = serde_json::json!({
@@ -1113,6 +1118,7 @@ mod tests {
         assert_eq!(normalize_network("localnet"), "localnet");
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn siwx_chain_id_for_network_maps_pay_networks() {
         assert_eq!(
@@ -1133,6 +1139,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn build_siwx_header_signs_selected_chain() {
         const TEST_KEYPAIR_BYTES: [u8; 64] = [
@@ -1180,6 +1187,7 @@ mod tests {
         assert!(solana_x402::siwx::verify_siwx_payload(&payload).unwrap());
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn build_siwx_auth_header_signs_without_payment() {
         const TEST_KEYPAIR_BYTES: [u8; 64] = [
@@ -1233,6 +1241,7 @@ mod tests {
         assert!(solana_x402::siwx::verify_siwx_payload(&payload).unwrap());
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn build_siwx_auth_header_rejects_unsupported_preferred_chain() {
         let extension = solana_x402::siwx::SiwxExtension::new(
@@ -1273,6 +1282,7 @@ mod tests {
         assert_eq!(X402_V2_PAYMENT_HEADER, "PAYMENT-SIGNATURE");
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn build_payment_rejects_network_intent_mismatch_before_signer_lookup() {
         let store = MemoryAccountsStore::new();
@@ -1295,6 +1305,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn build_payment_requires_mainnet_wallet_when_no_override_is_set() {
         let store = MemoryAccountsStore::new();
@@ -1312,6 +1323,7 @@ mod tests {
         assert!(msg.contains("pay setup"));
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn build_payment_reports_named_account_miss_for_network() {
         let store = MemoryAccountsStore::new();

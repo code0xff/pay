@@ -45,6 +45,18 @@ impl ImportCommand {
             return self.run_evm();
         }
 
+        #[cfg(not(feature = "solana"))]
+        {
+            return Err(pay_core::Error::Config(
+                "`pay account import` without `--chain-family evm` defaults to Solana \
+                 (ed25519 JSON keypair). This `pay` binary was built without the `solana` \
+                 feature. Use `--chain-family evm --secret-key-hex 0x...`, or rebuild with \
+                 `cargo build -p pay --features solana`."
+                    .to_string(),
+            ));
+        }
+        #[cfg(feature = "solana")]
+        {
         let theme = ColorfulTheme::default();
         let file_path = self.file.as_deref().ok_or_else(|| {
             pay_core::Error::Config(
@@ -167,6 +179,7 @@ impl ImportCommand {
         );
 
         Ok(())
+        }
     }
 }
 

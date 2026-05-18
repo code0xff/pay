@@ -854,6 +854,7 @@ mod tests {
         .to_string()
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn extract_x402_solana_usdc_records_protocol_currency_price() {
         let body = x402_body(vec![serde_json::json!({
@@ -950,6 +951,7 @@ mod tests {
         assert_eq!(paid.price_usd, Some(0.01));
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn extract_detects_siwx_only_endpoint() {
         let body = serde_json::json!({
@@ -997,6 +999,7 @@ mod tests {
         assert_eq!(paid.description.as_deref(), Some("Search by keyword"));
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn extract_handles_empty_body_and_headers() {
         let paid = extract_paid_endpoint(&[], None);
@@ -1088,6 +1091,7 @@ mod tests {
         assert!(paid.supported_usd.is_empty());
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_outcome_accepts_evm_only_x402_when_stable_known() {
         // Pre-Phase-15 this returned `WrongChain`; Phase 15 indexes it as
@@ -1138,6 +1142,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_outcome_prefers_evm_when_envelope_offers_both() {
         // EVM-first: when an envelope offers both Solana and Base, the

@@ -49,6 +49,7 @@ impl DestroyCommand {
             .and_then(|net| net.get(&self.account))
             .is_some();
 
+        #[cfg(feature = "solana")]
         if !in_file
             && network == MAINNET_NETWORK
             && let Some(discovered) = discover_legacy_account(&self.account)
@@ -247,7 +248,8 @@ fn keystore_for_kind(
     }
 }
 
-/// Probe keystores for a legacy account that predates accounts.yml.
+/// Probe keystores for a legacy Solana account that predates accounts.yml.
+#[cfg(feature = "solana")]
 fn discover_legacy_account(name: &str) -> Option<Account> {
     #[cfg(target_os = "macos")]
     {

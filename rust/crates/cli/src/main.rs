@@ -1,5 +1,6 @@
 mod commands;
 pub mod components;
+#[cfg(feature = "solana")]
 pub mod debugger_proxy;
 pub mod network;
 mod no_dna;
@@ -129,11 +130,14 @@ fn main() {
     let otlp_sidecar = command.otlp_sidecar().map(str::to_owned);
     let _otel_guard = init_logging(config.log_format, opts.verbose, otlp_sidecar.as_deref());
 
-    // ── Debugger proxy ─────────────────────────────────────────────────────
+    // ── Debugger proxy (solana-only) ───────────────────────────────────────
     //
     // When `--debugger` is set, spin up a forward proxy + PDB on port 1402
     // BEFORE launching the agent. The MCP curl tool will route through it
     // (via PAY_DEBUGGER_PROXY env var), capturing all traffic for the PDB UI.
+    // The Payment Debugger UI is Solana-only today, so this whole block is
+    // gated behind `feature = "solana"`.
+    #[cfg(feature = "solana")]
     if opts.debugger {
         match debugger_proxy::start_background() {
             Ok(proxy_url) => {
@@ -144,6 +148,15 @@ fn main() {
                 eprintln!("{}", format!("Debugger proxy failed: {e}").dimmed());
             }
         }
+    }
+    #[cfg(not(feature = "solana"))]
+    if opts.debugger {
+        eprintln!(
+            "{}",
+            "--debugger requires the `solana` feature (Payment Debugger UI). \
+             Rebuild with `cargo build -p pay --features solana`."
+                .dimmed()
+        );
     }
 
     // ── Network override + RPC URL ─────────────────────────────────────────

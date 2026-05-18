@@ -16,12 +16,14 @@ pub mod whoami;
 
 use clap::Subcommand;
 use owo_colors::OwoColorize;
+#[cfg(feature = "solana")]
 use pay_core::mpp;
 use pay_core::runner::RunOutcome;
 use pay_core::x402;
 use pay_core::x402::Challenge as X402Challenge;
 use pay_core::{run_curl_with_headers, run_httpie_with_headers, run_wget_with_headers};
 use pay_types::Stablecoin;
+#[cfg(feature = "solana")]
 use solana_mpp::{ChargeRequest, SessionRequest};
 
 use crate::no_dna;
@@ -270,6 +272,7 @@ fn handle_outcome(
     let is_json = no_dna::should_json(output_fmt);
 
     match outcome {
+        #[cfg(feature = "solana")]
         RunOutcome::MppChallenge {
             challenge,
             alternatives,
@@ -349,6 +352,7 @@ fn handle_outcome(
             }
         }
 
+        #[cfg(feature = "solana")]
         RunOutcome::SessionChallenge {
             challenge,
             resource_url,
@@ -464,6 +468,7 @@ fn handle_outcome(
             }
         }
 
+        #[cfg(feature = "solana")]
         RunOutcome::X402SignInChallenge {
             challenge,
             resource_url,
@@ -561,6 +566,7 @@ fn handle_outcome(
     Ok(())
 }
 
+#[cfg(feature = "solana")]
 fn mpp_challenges_within_cap(
     challenges: &[mpp::Challenge],
     payment_cap: u64,
@@ -621,6 +627,7 @@ fn mpp_challenges_within_cap(
     ))
 }
 
+#[cfg(feature = "solana")]
 fn enforce_session_cap(
     request: Option<&SessionRequest>,
     payment_cap: Option<u64>,
@@ -728,6 +735,7 @@ struct PaymentRetryContext<'a, 'tool> {
     verbose: bool,
 }
 
+#[cfg(feature = "solana")]
 fn pay_mpp_and_retry(
     challenges: &[mpp::Challenge],
     resource_url: &str,
@@ -781,6 +789,7 @@ fn pay_mpp_and_retry(
     handle_retry_outcome(retry_outcome, is_json)
 }
 
+#[cfg(feature = "solana")]
 fn mpp_challenge_currencies(challenges: &[mpp::Challenge]) -> Vec<String> {
     challenges
         .iter()
@@ -793,6 +802,7 @@ fn mpp_challenge_currencies(challenges: &[mpp::Challenge]) -> Vec<String> {
 
 /// Distinct networks advertised across MPP challenges, used by error messages
 /// to tell the user which networks the server offered.
+#[cfg(feature = "solana")]
 fn mpp_challenge_networks(challenges: &[mpp::Challenge]) -> Vec<String> {
     let mut out: Vec<String> = challenges
         .iter()
@@ -811,6 +821,7 @@ fn mpp_challenge_networks(challenges: &[mpp::Challenge]) -> Vec<String> {
     out
 }
 
+#[cfg(feature = "solana")]
 fn mpp_challenges_json(challenges: &[mpp::Challenge]) -> serde_json::Value {
     let values: Vec<serde_json::Value> = challenges
         .iter()
@@ -868,6 +879,7 @@ fn pay_x402_and_retry(
     handle_retry_outcome(retry_outcome, is_json)
 }
 
+#[cfg(feature = "solana")]
 fn pay_x402_siwx_and_retry(
     challenge: &x402::SiwxAuthChallenge,
     resource_url: &str,
@@ -902,6 +914,7 @@ fn pay_x402_siwx_and_retry(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "solana")]
 fn pay_session_and_retry(
     challenge: &mpp::Challenge,
     req: Option<&SessionRequest>,

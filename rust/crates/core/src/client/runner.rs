@@ -923,6 +923,7 @@ HTTP request sent, awaiting response...
         assert!(!is_passthrough_metadata_request(&args));
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_402_with_mpp() {
         use base64::Engine;
@@ -948,6 +949,7 @@ HTTP request sent, awaiting response...
         assert!(matches!(outcome, RunOutcome::MppChallenge { .. }));
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_402_preserves_multiple_mpp_charge_challenges() {
         use base64::Engine;
@@ -985,6 +987,7 @@ HTTP request sent, awaiting response...
         }
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_402_with_session_mpp() {
         use base64::Engine;
@@ -1010,6 +1013,7 @@ HTTP request sent, awaiting response...
         assert!(matches!(outcome, RunOutcome::SessionChallenge { .. }));
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_402_with_x402_header() {
         let requirements = serde_json::json!({
@@ -1029,6 +1033,7 @@ HTTP request sent, awaiting response...
         assert!(matches!(outcome, RunOutcome::X402Challenge { .. }));
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_402_with_x402_siwx_auth_only_header() {
         use base64::Engine;
@@ -1073,6 +1078,7 @@ HTTP request sent, awaiting response...
         }
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_402_prefers_payment_when_siwx_extends_payment_challenge() {
         use base64::Engine;
@@ -1250,6 +1256,7 @@ HTTP request sent, awaiting response...
         }
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn classify_402_unrelated_body_falls_through_to_challenge() {
         // First-call 402 with a JSON body that isn't verification_failed —

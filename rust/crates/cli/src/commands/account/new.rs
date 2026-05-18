@@ -41,6 +41,18 @@ impl NewCommand {
             return self.run_evm();
         }
 
+        #[cfg(not(feature = "solana"))]
+        {
+            return Err(pay_core::Error::Config(
+                "`pay account new` without `--chain-family evm` defaults to Solana, but this \
+                 `pay` binary was built without the `solana` feature. Use \
+                 `--chain-family evm --network <slug>`, or rebuild with \
+                 `cargo build -p pay --features solana`."
+                    .to_string(),
+            ));
+        }
+        #[cfg(feature = "solana")]
+        {
         let (pubkey, backend_name) = create_account(
             &self.name,
             self.backend.as_deref(),
@@ -61,6 +73,7 @@ impl NewCommand {
             completion.as_ref().map(|c| &c.received),
         );
         Ok(())
+        }
     }
 
     fn run_evm(&self) -> pay_core::Result<()> {
@@ -94,6 +107,7 @@ impl NewCommand {
 /// Core account creation logic. Returns the base58 pubkey on success.
 /// Shared by `pay account new` and `pay setup`.
 /// Returns `(pubkey_b58, backend_display_name)`.
+#[cfg(feature = "solana")]
 pub fn create_account(
     name: &str,
     backend: Option<&str>,
@@ -168,6 +182,9 @@ pub struct OpAccountInfo {
     pub account: Option<String>,
 }
 
+/// Construct an OS keystore handle from a backend id. Chain-neutral —
+/// both Solana (`pay account new`) and EVM (`pay account new --chain-family
+/// evm`) paths use this to materialize the keystore.
 fn build_keystore(
     backend_id: &str,
     vault: Option<&str>,
@@ -384,6 +401,7 @@ pub fn pick_backend() -> pay_core::Result<String> {
     Ok(options[selection].id.to_string())
 }
 
+#[cfg(feature = "solana")]
 pub fn save_account(
     name: &str,
     keystore: pay_core::accounts::Keystore,
@@ -417,6 +435,7 @@ pub fn save_account(
 ///
 /// Shows `✔` confirmation lines for keystore and (if funded) the received
 /// amount. Skips the topup hint when the user already funded during setup.
+#[cfg(feature = "solana")]
 pub fn print_next_steps(
     name: &str,
     backend_name: &str,
@@ -454,6 +473,7 @@ pub fn print_next_steps(
     eprintln!();
 }
 
+#[cfg(feature = "solana")]
 fn topup_required_body(name: &str) -> String {
     format!(
         "A top-up is required before making paid requests.\n$ {}",
@@ -475,6 +495,7 @@ pub fn format_received(r: &pay_core::client::balance::ReceivedFunds) -> String {
     String::new()
 }
 
+#[cfg(feature = "solana")]
 pub fn generate_keypair() -> (Vec<u8>, String) {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let verifying_key = signing_key.verifying_key();

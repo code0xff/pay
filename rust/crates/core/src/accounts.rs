@@ -851,6 +851,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn ephemeral_keypair_bytes_roundtrip() {
         let raw_bytes: Vec<u8> = (0u8..64).collect();
@@ -870,6 +871,7 @@ mod tests {
         assert_eq!(acct.ephemeral_keypair_bytes(), Some(raw_bytes));
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn ephemeral_keypair_bytes_none_for_keychain_account() {
         assert!(keychain_account("pk").ephemeral_keypair_bytes().is_none());
@@ -1065,6 +1067,7 @@ mod tests {
 
     // ── load_or_create_ephemeral_for_network ──────────────────────────────
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_or_create_creates_when_missing_and_persists() {
         let store = MemoryAccountsStore::new();
@@ -1108,6 +1111,7 @@ mod tests {
         assert_eq!(store.save_count(), 0, "must not persist on cache hit");
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn exact_load_or_create_default_does_not_reuse_other_named_account() {
         let mut f = AccountsFile::default();
@@ -1150,6 +1154,7 @@ mod tests {
         assert_eq!(store.save_count(), 0);
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_or_create_generates_distinct_keys_per_network() {
         let store = MemoryAccountsStore::new();
@@ -1168,6 +1173,7 @@ mod tests {
 
     // ── FileAccountsStore round-trip ──────────────────────────────────────
 
+    #[cfg(feature = "solana")]
     #[test]
     fn file_store_round_trip_via_tempdir() {
         let dir = tempfile::tempdir().unwrap();

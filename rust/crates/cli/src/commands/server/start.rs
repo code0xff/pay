@@ -1,31 +1,61 @@
 //! `pay server start` — start a payment gateway proxy.
+//!
+//! Most of this module is Solana-only (MPP gateway, SIWX, fee-payer wallet).
+//! When built without `--features solana`, the `StartCommand` struct keeps
+//! the clap surface alive but `run()` only dispatches the EVM x402 path;
+//! Solana specs error out with a "rebuild with --features solana" hint.
 
+#[cfg(feature = "solana")]
 use std::process::Command as ProcessCommand;
+#[cfg(feature = "solana")]
 use std::sync::Arc;
 
+#[cfg(feature = "solana")]
 use axum::middleware;
+#[cfg(feature = "solana")]
 use axum::response::{IntoResponse, Response};
+#[cfg(feature = "solana")]
 use axum::routing::{any, get, post};
+#[cfg(feature = "solana")]
 use owo_colors::OwoColorize;
+#[cfg(feature = "solana")]
 use pay_core::PaymentState;
+#[cfg(feature = "solana")]
 use pay_core::accounts::AccountsStore;
+#[cfg(feature = "solana")]
 use pay_core::server::session::SessionMpp;
+#[cfg(feature = "solana")]
 use pay_core::server::telemetry::FeePayerWallet;
+#[cfg(feature = "solana")]
 use pay_core::solana_x402;
+#[cfg(feature = "solana")]
 use pay_core::solana_x402::server::X402;
+#[cfg(feature = "solana")]
 use pay_types::Stablecoin;
-use pay_types::metering::{ApiSpec, OperatorConfig, PaymentProtocol, RoutingConfig, SignerConfig};
+use pay_types::metering::{ApiSpec, PaymentProtocol};
+#[cfg(feature = "solana")]
+use pay_types::metering::{OperatorConfig, RoutingConfig, SignerConfig};
+#[cfg(feature = "solana")]
 use solana_mpp::server::Mpp;
+#[cfg(feature = "solana")]
 use solana_mpp::solana_keychain::SolanaSigner;
+#[cfg(feature = "solana")]
 use solana_mpp::solana_keychain::memory::MemorySigner;
+#[cfg(feature = "solana")]
 use tokio::time::{Duration, Instant};
 
+#[cfg(feature = "solana")]
 use crate::components::{PAY_SH_TAGLINE, render_pay_banner, solana_explorer_cluster_query};
+#[cfg(feature = "solana")]
 use crate::network::SolanaNetwork;
 
+#[cfg(feature = "solana")]
 const AUTO_OPERATOR_ACCOUNT_NAME: &str = "gateway";
+#[cfg(feature = "solana")]
 const BROWSER_RPC_PROXY_PATH: &str = "/__402/rpc";
+#[cfg(feature = "solana")]
 const FEE_PAYER_BALANCE_OBSERVE_INTERVAL: Duration = Duration::from_secs(300);
+#[cfg(feature = "solana")]
 const BROWSER_RPC_ALLOWED_METHODS: &[&str] = &[
     "getLatestBlockhash",
     "surfnet_setAccount",
@@ -86,6 +116,7 @@ pub struct StartCommand {
     pub scaffolded_spec: Option<String>,
 }
 
+#[cfg(feature = "solana")]
 #[derive(Clone)]
 struct AppState {
     apis: Arc<Vec<ApiSpec>>,
@@ -96,6 +127,7 @@ struct AppState {
     fee_payer_wallet: Option<FeePayerWallet>,
 }
 
+#[cfg(feature = "solana")]
 impl PaymentState for AppState {
     fn apis(&self) -> &[ApiSpec] {
         &self.apis
@@ -120,6 +152,7 @@ impl PaymentState for AppState {
     }
 }
 
+#[cfg(feature = "solana")]
 fn should_use_auto_fee_payer_signer(
     sandbox: bool,
     network: &SolanaNetwork,
@@ -143,6 +176,29 @@ fn is_evm_x402_spec(api: &ApiSpec) -> bool {
         .is_some_and(pay_core::accounts::is_evm_network_family)
 }
 
+/// EVM-only stub: parses the spec, dispatches to the EVM x402 runtime when
+/// it matches, otherwise tells the user to rebuild with `--features solana`.
+#[cfg(not(feature = "solana"))]
+impl StartCommand {
+    pub fn run(self, _active_account_name: Option<&str>, _sandbox: bool) -> pay_core::Result<()> {
+        let expanded = shellexpand::tilde(&self.spec);
+        let contents = std::fs::read_to_string(expanded.as_ref())
+            .map_err(|e| pay_core::Error::Config(format!("Failed to read {}: {e}", self.spec)))?;
+        let api: ApiSpec = serde_yml::from_str(&contents)
+            .map_err(|e| pay_core::Error::Config(format!("Invalid spec: {e}")))?;
+        if is_evm_x402_spec(&api) {
+            return super::evm_x402_start::run(&self.bind, api);
+        }
+        Err(pay_core::Error::Config(
+            "This spec selects a Solana gateway, but the `pay` binary was built without the \
+             `solana` feature. Rebuild with `cargo build -p pay --features solana`, or switch \
+             the spec to `protocol: x402` on an EVM network."
+                .to_string(),
+        ))
+    }
+}
+
+#[cfg(feature = "solana")]
 impl StartCommand {
     pub fn run(self, active_account_name: Option<&str>, sandbox: bool) -> pay_core::Result<()> {
         let debugger = self.debugger || sandbox;
@@ -986,6 +1042,7 @@ impl StartCommand {
     }
 }
 
+#[cfg(feature = "solana")]
 fn spawn_fee_payer_balance_observer(wallet: FeePayerWallet, subdomain: String) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval_at(
@@ -1000,6 +1057,7 @@ fn spawn_fee_payer_balance_observer(wallet: FeePayerWallet, subdomain: String) {
     });
 }
 
+#[cfg(feature = "solana")]
 fn build_endpoints_json(api: &ApiSpec) -> serde_json::Value {
     let endpoints: Vec<serde_json::Value> = api
         .endpoints
@@ -1036,6 +1094,7 @@ fn build_endpoints_json(api: &ApiSpec) -> serde_json::Value {
 }
 
 /// Build the sidebar config for the PDB frontend.
+#[cfg(feature = "solana")]
 fn build_pdb_config(
     api: &ApiSpec,
     recipient: &str,
@@ -1095,6 +1154,7 @@ fn build_pdb_config(
 /// `servers[].url` to the public URL of *this* server so callers can drive
 /// the proxy directly from the spec. The public URL comes from
 /// `--public-url` if set, else from the request's `Host` header.
+#[cfg(feature = "solana")]
 fn serve_openapi(
     doc: Arc<serde_json::Value>,
     proxy_mode: bool,
@@ -1111,6 +1171,7 @@ fn serve_openapi(
     axum::Json(out).into_response()
 }
 
+#[cfg(feature = "solana")]
 fn derive_public_url_from_host(headers: &axum::http::HeaderMap) -> String {
     let host = headers
         .get(axum::http::header::HOST)
@@ -1132,6 +1193,7 @@ fn derive_public_url_from_host(headers: &axum::http::HeaderMap) -> String {
     format!("{scheme}://{host}")
 }
 
+#[cfg(feature = "solana")]
 async fn browser_rpc_proxy(
     client: reqwest::Client,
     rpc_url: String,
@@ -1185,6 +1247,7 @@ async fn browser_rpc_proxy(
         .unwrap()
 }
 
+#[cfg(feature = "solana")]
 fn validate_browser_rpc_request(body: &[u8]) -> Result<(), &'static str> {
     let value: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| "Payment RPC request must be valid JSON.")?;
@@ -1208,6 +1271,7 @@ fn validate_browser_rpc_request(body: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(feature = "solana")]
 fn rpc_proxy_error(status: axum::http::StatusCode, message: &'static str) -> Response {
     (
         status,
@@ -1221,6 +1285,7 @@ fn rpc_proxy_error(status: axum::http::StatusCode, message: &'static str) -> Res
 
 /// Resolve a currency label to the value used in the MPP challenge.
 /// SPL tokens use their mint address; SOL uses "sol".
+#[cfg(feature = "solana")]
 fn resolve_currency(currency: &str, network: &str) -> (String, u8) {
     let currency = currency.trim();
     if currency.eq_ignore_ascii_case("SOL") {
@@ -1232,6 +1297,7 @@ fn resolve_currency(currency: &str, network: &str) -> (String, u8) {
     (currency.to_string(), 6)
 }
 
+#[cfg(feature = "solana")]
 fn resolve_operator_currencies(op: Option<&OperatorConfig>, cli_currency: &str) -> Vec<String> {
     let configured = op
         .and_then(|operator| operator.currencies.get("usd"))
@@ -1268,6 +1334,7 @@ fn resolve_operator_currencies(op: Option<&OperatorConfig>, cli_currency: &str) 
 ///
 /// Must be called from within the main async runtime so the GCP auth
 /// token cache's background refresh tasks stay alive.
+#[cfg(feature = "solana")]
 async fn resolve_signer(config: &SignerConfig) -> pay_core::Result<Arc<dyn SolanaSigner>> {
     let store = pay_core::accounts::FileAccountsStore::default_path();
     resolve_signer_with_store(config, &store).await
@@ -1279,6 +1346,7 @@ async fn resolve_signer(config: &SignerConfig) -> pay_core::Result<Arc<dyn Solan
 /// Handles all `SignerConfig` variants. The GCP KMS branch is feature-
 /// gated because it pulls in the gcp-auth crate; the Account and File
 /// branches need no extra build features.
+#[cfg(feature = "solana")]
 async fn resolve_signer_with_store(
     config: &SignerConfig,
     store: &dyn AccountsStore,
@@ -1366,6 +1434,7 @@ async fn resolve_signer_with_store(
 
 /// Fetch a wallet's lamport balance via JSON-RPC. Returns 0 on any error
 /// — used by the banner only, where a missing balance is harmless.
+#[cfg(feature = "solana")]
 async fn fetch_lamports(client: &reqwest::Client, rpc_url: &str, pubkey: &str) -> u64 {
     let resp = client
         .post(rpc_url)
@@ -1388,11 +1457,13 @@ async fn fetch_lamports(client: &reqwest::Client, rpc_url: &str, pubkey: &str) -
     }
 }
 
+#[cfg(feature = "solana")]
 async fn fetch_sol_balance(rpc_url: &str, pubkey: &str) -> f64 {
     let client = reqwest::Client::new();
     fetch_lamports(&client, rpc_url, pubkey).await as f64 / 1_000_000_000.0
 }
 
+#[cfg(feature = "solana")]
 fn format_price(price: f64) -> String {
     if price.fract() == 0.0 {
         format!("{}", price as u64)
@@ -1402,6 +1473,7 @@ fn format_price(price: f64) -> String {
     }
 }
 
+#[cfg(feature = "solana")]
 fn ensure_local_multi_delegator_program(rpc_url: &str, program_id: &str) -> pay_core::Result<()> {
     if local_program_is_executable(rpc_url, program_id) {
         eprintln!(
@@ -1493,6 +1565,7 @@ fn ensure_local_multi_delegator_program(rpc_url: &str, program_id: &str) -> pay_
     Ok(())
 }
 
+#[cfg(feature = "solana")]
 fn ensure_local_fiber_program(rpc_url: &str) -> pay_core::Result<solana_pubkey::Pubkey> {
     use std::str::FromStr;
 
@@ -1573,6 +1646,7 @@ fn ensure_local_fiber_program(rpc_url: &str) -> pay_core::Result<solana_pubkey::
     Ok(program_id)
 }
 
+#[cfg(feature = "solana")]
 fn local_program_is_executable(rpc_url: &str, program_id: &str) -> bool {
     let output = ProcessCommand::new("curl")
         .arg("-s")
@@ -1594,6 +1668,7 @@ fn local_program_is_executable(rpc_url: &str, program_id: &str) -> bool {
     body.contains("\"executable\":true")
 }
 
+#[cfg(feature = "solana")]
 fn localnet_fee_payer_keypair_file() -> pay_core::Result<tempfile::NamedTempFile> {
     use std::io::Write;
 
@@ -1623,6 +1698,7 @@ fn localnet_fee_payer_keypair_file() -> pay_core::Result<tempfile::NamedTempFile
 // ── Gateway verify endpoint ──
 
 #[derive(serde::Deserialize)]
+#[cfg(feature = "solana")]
 struct GatewayVerifyRequest {
     method: String,
     path: String,
@@ -1642,6 +1718,7 @@ struct GatewayVerifyRequest {
 }
 
 #[derive(serde::Serialize)]
+#[cfg(feature = "solana")]
 struct GatewayVerifyResponse {
     decision: String,
     status_code: u16,
@@ -1663,6 +1740,7 @@ struct GatewayVerifyResponse {
     external_id: Option<String>,
 }
 
+#[cfg(feature = "solana")]
 async fn gateway_verify(
     mpps: Vec<Mpp>,
     req: GatewayVerifyRequest,
@@ -1822,6 +1900,7 @@ async fn gateway_verify(
     }
 }
 
+#[cfg(feature = "solana")]
 fn gateway_charge_challenges(
     mpps: &[Mpp],
     req: &GatewayVerifyRequest,

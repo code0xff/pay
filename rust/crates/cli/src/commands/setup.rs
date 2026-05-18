@@ -73,28 +73,44 @@ impl SetupCommand {
         // Install MCP configs into Claude / Codex / Claude Desktop.
         install_mcp_configs();
 
-        let (pubkey, backend_name) = super::account::new::create_account(
-            &account_name,
-            self.backend.as_deref(),
-            self.vault.as_deref(),
-            self.force,
-        )?;
+        #[cfg(feature = "solana")]
+        {
+            let (pubkey, backend_name) = super::account::new::create_account(
+                &account_name,
+                self.backend.as_deref(),
+                self.vault.as_deref(),
+                self.force,
+            )?;
 
-        let config = pay_core::Config::load().unwrap_or_default();
-        let rpc_url = config
-            .rpc_url
-            .clone()
-            .unwrap_or_else(pay_core::balance::mainnet_rpc_url);
-        let completion = crate::tui::run_topup_flow(&pubkey, &rpc_url, &account_name)?;
-        if let Some(completion) = completion {
-            print_setup_success(backend_name, &completion, &rpc_url);
-        } else {
-            print_setup_aborted(&account_name, backend_name);
+            let config = pay_core::Config::load().unwrap_or_default();
+            let rpc_url = config
+                .rpc_url
+                .clone()
+                .unwrap_or_else(pay_core::balance::mainnet_rpc_url);
+            let completion = crate::tui::run_topup_flow(&pubkey, &rpc_url, &account_name)?;
+            if let Some(completion) = completion {
+                print_setup_success(backend_name, &completion, &rpc_url);
+            } else {
+                print_setup_aborted(&account_name, backend_name);
+            }
+            Ok(())
         }
-        Ok(())
+        #[cfg(not(feature = "solana"))]
+        {
+            let _ = account_name;
+            crate::components::print_notice(
+                crate::components::NoticeLevel::Info,
+                "MCP configured",
+                "MCP entries installed. EVM account provisioning is not yet automated in \
+                 setup; create an EVM account manually with \
+                 `pay account new --chain-family evm --network <slug>`.",
+            );
+            Ok(())
+        }
     }
 }
 
+#[cfg(feature = "solana")]
 fn print_setup_success(
     backend_name: &str,
     completion: &crate::tui::TopupCompletion,
@@ -107,6 +123,7 @@ fn print_setup_success(
     );
 }
 
+#[cfg(feature = "solana")]
 fn setup_success_body(
     backend_name: &str,
     completion: &crate::tui::TopupCompletion,

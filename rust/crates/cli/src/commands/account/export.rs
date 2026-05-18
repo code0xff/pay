@@ -17,6 +17,19 @@ pub struct ExportCommand {
     pub path: Option<String>,
 }
 
+#[cfg(not(feature = "solana"))]
+impl ExportCommand {
+    pub fn run(self) -> pay_core::Result<()> {
+        let _ = self;
+        Err(pay_core::Error::Config(
+            "`pay account export` exports an ed25519 Solana keypair; this `pay` binary was built \
+             without the `solana` feature. Rebuild with `cargo build -p pay --features solana`."
+                .to_string(),
+        ))
+    }
+}
+
+#[cfg(feature = "solana")]
 impl ExportCommand {
     pub fn run(self) -> pay_core::Result<()> {
         let accounts = pay_core::accounts::AccountsFile::load()?;

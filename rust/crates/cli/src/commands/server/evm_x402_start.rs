@@ -16,11 +16,14 @@ use owo_colors::OwoColorize;
 use pay_core::PaymentState;
 use pay_core::server::evm_x402_payment::EvmTarget;
 use pay_core::server::in_flight::InFlight;
+#[cfg(feature = "solana")]
 use pay_core::server::session::SessionMpp;
 use pay_core::server::telemetry::FeePayerWallet;
 use pay_core::server::x402_facilitator::FacilitatorClient;
+#[cfg(feature = "solana")]
 use pay_core::solana_x402::server::X402;
 use pay_types::metering::ApiSpec;
+#[cfg(feature = "solana")]
 use solana_mpp::server::Mpp;
 
 #[derive(Clone)]
@@ -44,12 +47,15 @@ impl PaymentState for EvmAppState {
     fn apis(&self) -> &[ApiSpec] {
         &self.apis
     }
+    #[cfg(feature = "solana")]
     fn mpp(&self) -> Option<&Mpp> {
         None
     }
+    #[cfg(feature = "solana")]
     fn mpps(&self) -> Vec<&Mpp> {
         Vec::new()
     }
+    #[cfg(feature = "solana")]
     fn x402s(&self) -> Vec<&X402> {
         Vec::new()
     }
@@ -59,6 +65,7 @@ impl PaymentState for EvmAppState {
     fn browser_rpc_url(&self) -> Option<&str> {
         None
     }
+    #[cfg(feature = "solana")]
     fn session_mpp(&self) -> Option<&SessionMpp> {
         None
     }

@@ -708,7 +708,7 @@ fn evm_backend_label(account: &crate::accounts::Account) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "solana"))]
 mod tests {
     use super::*;
 
@@ -754,6 +754,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_signer_with_valid_keypair_file() {
         use solana_mpp::solana_keychain::SolanaSigner;
@@ -784,6 +785,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_signer_accepts_inline_private_key_string() {
         use solana_mpp::solana_keychain::SolanaSigner;
@@ -842,6 +844,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_signer_for_network_resolves_existing_ephemeral() {
         let mut file = AccountsFile::default();
@@ -860,6 +863,7 @@ mod tests {
         assert_eq!(store.save_count(), 0, "no writes on cache hit");
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_signer_for_network_lazy_creates_localnet() {
         // No mapping → auto-create + persist + return Some(ResolvedEphemeral).
@@ -919,6 +923,7 @@ mod tests {
         assert_eq!(store.save_count(), 1);
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_signer_for_network_caches_lazy_created_keypair() {
         // First call creates, second call must hit the cache (same pubkey,
@@ -934,6 +939,7 @@ mod tests {
         assert_eq!(store.save_count(), 1, "exactly one write across both calls");
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_signer_for_network_resolves_named_existing_ephemeral() {
         let mut file = AccountsFile::default();
@@ -958,6 +964,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "solana")]
     #[test]
     fn load_signer_for_network_lazy_creates_named_localnet_account() {
         let store = MemoryAccountsStore::new();
