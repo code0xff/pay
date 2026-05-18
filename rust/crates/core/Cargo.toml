@@ -64,7 +64,9 @@ sha2 = "0.10"
 rand = { workspace = true }
 uuid = { workspace = true }
 blake3 = { workspace = true }
-reqwest = { workspace = true }
+# `json` feature is required by balance.rs / facilitator client even in
+# EVM-only builds. Previously pulled in transitively via solana-rpc-client.
+reqwest = { workspace = true, features = ["json"] }
 pay-keystore = { workspace = true }
 
 # Solana (opt-in; activated by the `solana` feature — Phase 20)

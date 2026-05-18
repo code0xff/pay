@@ -1,5 +1,6 @@
 //! Resolve a signer from a keypair source — file path, Keychain, or 1Password.
 
+#[cfg(feature = "solana")]
 use solana_mpp::solana_keychain::MemorySigner;
 
 use crate::accounts::{
@@ -17,12 +18,14 @@ use crate::{Error, Result};
 /// - `windows-hello:<account>` — load from Windows Credential Manager (triggers Windows Hello)
 /// - `1password:<account>` — load from 1Password (triggers `op` CLI auth)
 /// - anything else — treat as a file path
+#[cfg(feature = "solana")]
 pub fn load_signer(source: &str) -> Result<MemorySigner> {
     load_signer_with_intent(source, &AuthIntent::default_payment())
 }
 
 /// Load a signer for a payment, prefixing rejection errors with the amount
 /// (e.g. "$0.10 payment authorization was rejected by user at Apple Keychain").
+#[cfg(feature = "solana")]
 pub fn load_signer_for_payment(source: &str, amount: &str, desc: &str) -> Result<MemorySigner> {
     let intent = AuthIntent::authorize_payment(amount, desc);
     load_signer_with_intent(source, &intent).map_err(|e| match e {
@@ -54,6 +57,7 @@ pub fn load_signer_for_payment(source: &str, amount: &str, desc: &str) -> Result
 ///    for `mainnet`; the user must run `pay setup` to bind their real
 ///    wallet first. This is intentional — silently generating a mainnet
 ///    wallet would be a footgun.
+#[cfg(feature = "solana")]
 pub fn load_signer_for_network(
     network: &str,
     store: &dyn AccountsStore,
@@ -64,6 +68,7 @@ pub fn load_signer_for_network(
 /// Variant of [`load_signer_for_network`] that takes an explicit reason
 /// string for the keystore auth prompt (e.g.
 /// "authorize payment of $0.10 for accessing API api.example.com").
+#[cfg(feature = "solana")]
 pub fn load_signer_for_network_with_reason(
     network: &str,
     store: &dyn AccountsStore,
@@ -80,6 +85,7 @@ pub fn load_signer_for_network_with_reason(
 
 /// Variant of [`load_signer_for_network`] that takes a typed keystore auth
 /// intent.
+#[cfg(feature = "solana")]
 pub fn load_signer_for_network_with_intent(
     network: &str,
     store: &dyn AccountsStore,
@@ -123,6 +129,7 @@ pub fn load_signer_for_network_with_intent(
 
 /// Network-aware loader for a payment, with the same amount-prefixed
 /// rejection-error rewrap as [`load_signer_for_payment`].
+#[cfg(feature = "solana")]
 pub fn load_signer_for_network_payment(
     network: &str,
     store: &dyn AccountsStore,
@@ -134,6 +141,7 @@ pub fn load_signer_for_network_payment(
     load_signer_for_network_payment_with_intent(network, store, account_override, amount, &intent)
 }
 
+#[cfg(feature = "solana")]
 pub fn load_signer_for_network_payment_with_intent(
     network: &str,
     store: &dyn AccountsStore,
@@ -158,6 +166,7 @@ fn is_lazy_ephemeral_network(network: &str) -> bool {
     matches!(network, "localnet" | "devnet")
 }
 
+#[cfg(feature = "solana")]
 pub fn load_keypair_bytes_from_account_with_reason(
     account: &Account,
     name: &str,
@@ -172,6 +181,7 @@ pub fn load_keypair_bytes_from_account_with_reason(
     )
 }
 
+#[cfg(feature = "solana")]
 pub fn load_keypair_bytes_from_account_with_intent(
     account: &Account,
     name: &str,
@@ -279,6 +289,7 @@ pub fn load_keypair_bytes_from_account_with_intent(
     }
 }
 
+#[cfg(feature = "solana")]
 pub fn load_signer_from_account_with_reason(
     account: &Account,
     name: &str,
@@ -299,6 +310,7 @@ pub fn load_signer_from_account_with_reason(
     })
 }
 
+#[cfg(feature = "solana")]
 pub fn load_signer_from_account_with_intent(
     account: &Account,
     name: &str,
@@ -314,6 +326,7 @@ pub fn load_signer_from_account_with_intent(
     })
 }
 
+#[cfg(feature = "solana")]
 fn signer_from_ephemeral(account: &Account) -> Result<MemorySigner> {
     let bytes = account.ephemeral_keypair_bytes().ok_or_else(|| {
         Error::Config("Ephemeral account is missing its inline `secret_key_b58` field".to_string())
@@ -322,6 +335,7 @@ fn signer_from_ephemeral(account: &Account) -> Result<MemorySigner> {
         .map_err(|e| Error::Config(format!("Invalid ephemeral keypair bytes: {e}")))
 }
 
+#[cfg(feature = "solana")]
 fn maybe_authenticate_ephemeral_account(
     account: &Account,
     network: &str,
@@ -361,6 +375,7 @@ fn maybe_authenticate_ephemeral_account(
     }
 }
 
+#[cfg(feature = "solana")]
 fn map_ephemeral_auth_error(e: crate::keystore::Error) -> Error {
     if matches!(e, crate::keystore::Error::AuthDenied(_)) {
         Error::PaymentRejected("rejected by user at authentication prompt".to_string())
@@ -370,11 +385,13 @@ fn map_ephemeral_auth_error(e: crate::keystore::Error) -> Error {
 }
 
 /// Load a `MemorySigner` with a custom reason string.
+#[cfg(feature = "solana")]
 pub fn load_signer_with_reason(source: &str, reason: &str) -> Result<MemorySigner> {
     load_signer_with_intent(source, &AuthIntent::from_reason(reason))
 }
 
 /// Load a `MemorySigner` with a typed auth intent.
+#[cfg(feature = "solana")]
 pub fn load_signer_with_intent(source: &str, intent: &AuthIntent) -> Result<MemorySigner> {
     let bytes = load_signer_keypair_bytes_with_intent(source, intent)?;
     MemorySigner::from_bytes(&bytes).map_err(|e| {
@@ -385,6 +402,7 @@ pub fn load_signer_with_intent(source: &str, intent: &AuthIntent) -> Result<Memo
     })
 }
 
+#[cfg(feature = "solana")]
 pub fn load_signer_keypair_bytes_with_reason(
     source: &str,
     reason: &str,
@@ -392,6 +410,7 @@ pub fn load_signer_keypair_bytes_with_reason(
     load_signer_keypair_bytes_with_intent(source, &AuthIntent::from_reason(reason))
 }
 
+#[cfg(feature = "solana")]
 pub fn load_signer_keypair_bytes_with_intent(
     source: &str,
     intent: &AuthIntent,
@@ -411,6 +430,7 @@ pub fn load_signer_keypair_bytes_with_intent(
 
 /// Human-readable name of the auth UI for a given keystore backend, used in
 /// "Payment rejected" messages when the user cancels at the OS prompt.
+/// Shared by Solana and EVM keystore loaders.
 fn rejection_source(backend: &str) -> &'static str {
     match backend {
         "keychain" => "rejected by user at Apple Keychain",
@@ -429,6 +449,7 @@ fn map_keystore_backend_error(backend: &str, e: crate::keystore::Error) -> Error
     }
 }
 
+#[cfg(feature = "solana")]
 fn load_from_file(path: &str) -> Result<crate::keystore::Zeroizing<Vec<u8>>> {
     let expanded = shellexpand::tilde(path);
     // Newer solana-keychain split file vs inline-string parsing into two
@@ -448,6 +469,7 @@ fn load_from_file(path: &str) -> Result<crate::keystore::Zeroizing<Vec<u8>>> {
     }
 }
 
+#[cfg(feature = "solana")]
 fn parse_private_key_string(input: &str) -> std::result::Result<Vec<u8>, String> {
     let trimmed = input.trim();
 
@@ -469,6 +491,7 @@ fn parse_private_key_string(input: &str) -> std::result::Result<Vec<u8>, String>
     Ok(bytes)
 }
 
+#[cfg(feature = "solana")]
 fn load_from_keystore_backend(
     backend: &str,
     account: &str,

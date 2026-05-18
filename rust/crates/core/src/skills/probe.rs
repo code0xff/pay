@@ -90,8 +90,8 @@ fn amount_to_usd(amount_str: &str, decimals: u8) -> Option<f64> {
 /// options in the index for matching downstream consumers; the Solana-only
 /// build naturally falls through to Solana.
 fn pick_indexable_x402<'a>(
-    candidates: &'a [solana_x402::exact::PaymentRequirements],
-) -> Option<&'a solana_x402::exact::PaymentRequirements> {
+    candidates: &'a [crate::x402_proto::PaymentRequirements],
+) -> Option<&'a crate::x402_proto::PaymentRequirements> {
     {
         if let Some(r) = candidates
             .iter()
@@ -124,7 +124,7 @@ fn resolve_offer(network: &str, asset: &str) -> Option<(String, String, u8)> {
         let caip2 = if network.starts_with("solana:") {
             network.to_string()
         } else {
-            solana_x402::exact::SOLANA_MAINNET.to_string()
+            crate::x402_proto::SOLANA_MAINNET.to_string()
         };
         let decimals = decimals_for(&symbol);
         return Some((caip2, symbol, decimals));
@@ -386,57 +386,60 @@ pub fn extract_paid_endpoint(headers: &[(String, String)], body: Option<&str>) -
         }
     }
 
-    // ── MPP challenges (iterate ALL) ──
-    let mut found_mpp_solana = false;
-    let mut mpp_description: Option<String> = None;
-    for challenge in crate::client::mpp::parse_headers(headers) {
-        if !solana_mpp::client::is_solana_charge_challenge(&challenge) {
-            continue;
-        }
-        let request: solana_mpp::ChargeRequest = match challenge.request.decode() {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let symbol = normalize_currency(&request.currency);
-        if !is_usd_stable(&symbol) {
-            continue;
-        }
-        found_mpp_solana = true;
-        push_unique(&mut paid.supported_usd, &symbol);
+    // ── MPP challenges (iterate ALL) ── (Solana-only)
+    #[cfg(feature = "solana")]
+    {
+        let mut found_mpp_solana = false;
+        let mut mpp_description: Option<String> = None;
+        for challenge in crate::client::mpp::parse_headers(headers) {
+            if !solana_mpp::client::is_solana_charge_challenge(&challenge) {
+                continue;
+            }
+            let request: solana_mpp::ChargeRequest = match challenge.request.decode() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let symbol = normalize_currency(&request.currency);
+            if !is_usd_stable(&symbol) {
+                continue;
+            }
+            found_mpp_solana = true;
+            push_unique(&mut paid.supported_usd, &symbol);
 
-        let decimals = decimals_for(&symbol);
-        let price_usd = amount_to_usd(&request.amount, decimals);
-        if let Some(usd) = price_usd {
-            update_canonical_price(&mut paid.price_usd, usd, &symbol);
+            let decimals = decimals_for(&symbol);
+            let price_usd = amount_to_usd(&request.amount, decimals);
+            if let Some(usd) = price_usd {
+                update_canonical_price(&mut paid.price_usd, usd, &symbol);
+            }
+            let recipient = request.recipient.clone().unwrap_or_default();
+            if !recipient.is_empty() {
+                push_unique(&mut paid.recipients, &recipient);
+            }
+            // Phase 15: MPP is Solana-only; surface the offer alongside x402
+            // entries so downstream consumers see a unified per-chain list.
+            paid.chain_offers.push(ChainOffer {
+                network: crate::x402_proto::SOLANA_MAINNET.to_string(),
+                currency: symbol.clone(),
+                asset: request.currency.clone(),
+                recipient,
+                amount_raw: request.amount.clone(),
+                price_usd,
+            });
+            if mpp_description.is_none() {
+                mpp_description = request
+                    .description
+                    .as_deref()
+                    .or(challenge.description.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+            }
         }
-        let recipient = request.recipient.clone().unwrap_or_default();
-        if !recipient.is_empty() {
-            push_unique(&mut paid.recipients, &recipient);
-        }
-        // Phase 15: MPP is Solana-only; surface the offer alongside x402
-        // entries so downstream consumers see a unified per-chain list.
-        paid.chain_offers.push(ChainOffer {
-            network: solana_x402::exact::SOLANA_MAINNET.to_string(),
-            currency: symbol.clone(),
-            asset: request.currency.clone(),
-            recipient,
-            amount_raw: request.amount.clone(),
-            price_usd,
-        });
-        if mpp_description.is_none() {
-            mpp_description = request
-                .description
-                .as_deref()
-                .or(challenge.description.as_deref())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-        }
-    }
-    if found_mpp_solana {
-        push_unique(&mut paid.protocols, "mpp");
-        if paid.description.is_none() {
-            paid.description = mpp_description;
+        if found_mpp_solana {
+            push_unique(&mut paid.protocols, "mpp");
+            if paid.description.is_none() {
+                paid.description = mpp_description;
+            }
         }
     }
 
@@ -592,6 +595,7 @@ fn probe_endpoint(
 /// Map a `RunOutcome` to a `ProbeStatus`.
 fn classify_outcome(outcome: RunOutcome, accepted: &[String]) -> ProbeStatus {
     match outcome {
+        #[cfg(feature = "solana")]
         RunOutcome::MppChallenge { challenge, .. } => {
             let request: solana_mpp::ChargeRequest = match challenge.request.decode() {
                 Ok(r) => r,
@@ -627,6 +631,7 @@ fn classify_outcome(outcome: RunOutcome, accepted: &[String]) -> ProbeStatus {
             }
         }
 
+        #[cfg(feature = "solana")]
         RunOutcome::SessionChallenge { .. } => {
             // Session challenges are valid Solana endpoints but use a
             // different payment flow. Mark as ok with protocol "mpp-session".
@@ -697,6 +702,7 @@ fn classify_outcome(outcome: RunOutcome, accepted: &[String]) -> ProbeStatus {
             }
         }
 
+        #[cfg(feature = "solana")]
         RunOutcome::X402SignInChallenge { .. } => ProbeStatus::Ok {
             protocol: "x402-siwx".into(),
             currency: "sign-in".into(),
@@ -1087,7 +1093,7 @@ mod tests {
         // Pre-Phase-15 this returned `WrongChain`; Phase 15 indexes it as
         // `Ok` with the eip155 CAIP-2 surfaced via `network`.
         use crate::client::runner::RunOutcome;
-        use solana_x402::exact::PaymentRequirements;
+        use crate::x402_proto::PaymentRequirements;
         let req = PaymentRequirements {
             network: "eip155:8453".to_string(),
             cluster: None,
@@ -1137,7 +1143,7 @@ mod tests {
         // EVM-first: when an envelope offers both Solana and Base, the
         // probe surfaces the Base entry as the primary `ProbeStatus::Ok::network`.
         use crate::client::runner::RunOutcome;
-        use solana_x402::exact::PaymentRequirements;
+        use crate::x402_proto::PaymentRequirements;
         let solana_req = PaymentRequirements {
             network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
             cluster: None,

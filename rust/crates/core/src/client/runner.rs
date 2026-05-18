@@ -3,6 +3,7 @@ use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
 use tracing::{debug, info};
 
+#[cfg(feature = "solana")]
 use crate::client::mpp;
 use crate::client::x402;
 use crate::{Error, Result};
@@ -10,14 +11,16 @@ use crate::{Error, Result};
 /// The outcome of running a wrapped command.
 #[derive(Debug)]
 pub enum RunOutcome {
-    /// The server returned 402 with an MPP charge challenge.
+    /// The server returned 402 with an MPP charge challenge (Solana).
+    #[cfg(feature = "solana")]
     MppChallenge {
         challenge: Box<mpp::Challenge>,
         alternatives: Vec<mpp::Challenge>,
         resource_url: String,
     },
-    /// The server returned 402 with an MPP session challenge (intent="session").
+    /// The server returned 402 with an MPP session challenge (intent="session", Solana).
     /// Session payments require a stateful client with a Fiber channel.
+    #[cfg(feature = "solana")]
     SessionChallenge {
         challenge: Box<mpp::Challenge>,
         resource_url: String,
@@ -27,7 +30,8 @@ pub enum RunOutcome {
         challenge: Box<x402::Challenge>,
         resource_url: String,
     },
-    /// The server returned 402 with an auth-only x402 SIWX challenge.
+    /// The server returned 402 with an auth-only x402 SIWX challenge (Solana).
+    #[cfg(feature = "solana")]
     X402SignInChallenge {
         challenge: Box<x402::SiwxAuthChallenge>,
         resource_url: String,
@@ -413,8 +417,9 @@ pub(crate) fn classify_402(
         };
     }
 
-    // Parse both protocols — multi-chain endpoints may advertise both
-    // x402 (Solana + Base) and Tempo/MPP (EVM-only).
+    // Phase 20: x402 is the primary protocol. Check it before MPP/Session
+    // so multi-chain endpoints (EVM + Solana) prefer the chain-neutral
+    // path. MPP/Session detection is Solana-only legacy.
     //
     // Some servers use `payment-required` instead of `x-payment-required`
     // for x402. If the standard parse fails, try decoding `payment-required`
@@ -422,73 +427,67 @@ pub(crate) fn classify_402(
     let x402_challenge = x402::parse(headers, body).or_else(|| {
         headers
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(solana_x402::PAYMENT_REQUIRED_HEADER))
+            .find(|(k, _)| k.eq_ignore_ascii_case(crate::x402_proto::PAYMENT_REQUIRED_HEADER))
             .and_then(|(_, v)| {
                 use base64::Engine;
                 let decoded = base64::engine::general_purpose::STANDARD.decode(v).ok()?;
                 let json_str = String::from_utf8(decoded).ok()?;
-                // Re-parse with the decoded JSON as the body
                 x402::parse(&[], Some(&json_str))
             })
     });
-    let mpp_challenges = mpp::parse_headers(headers);
-    let x402_siwx_challenge = x402::parse_siwx_auth(headers, body);
 
-    // x402::parse (from solana_x402) only returns Some when a Solana-
-    // compatible `accepts` entry exists — it's already a Solana filter.
-    // MPP is chain-agnostic at the parse level, so we need to validate
-    // the recipient is a valid Solana pubkey.
-    // Session MPP: the method field ("solana") indicates chain support.
-    // Session requests don't use ChargeRequest so mpp_is_solana doesn't apply.
-    if let Some(challenge) = mpp_challenges
-        .iter()
-        .find(|challenge| challenge.intent.as_str() == "session")
-    {
-        let is_solana_method = challenge.method.as_str() == "solana";
-        if is_solana_method {
-            info!(
-                resource = resource_url,
-                "Detected MPP session challenge (Solana)"
-            );
-            return RunOutcome::SessionChallenge {
-                challenge: Box::new(challenge.clone()),
-                resource_url: resource_url.to_string(),
-            };
-        }
-        // Non-Solana session — fall through to x402 or error.
-    }
-
-    // Prefer MPP for one-shot Solana payments (native protocol).
-    let mut charge_challenges: Vec<mpp::Challenge> = mpp_challenges
-        .iter()
-        .filter(|challenge| solana_mpp::client::is_solana_charge_challenge(challenge))
-        .cloned()
-        .collect();
-    if !charge_challenges.is_empty() {
-        let challenge = charge_challenges.remove(0);
-        info!(resource = resource_url, "Detected MPP challenge (Solana)");
-        return RunOutcome::MppChallenge {
-            challenge: Box::new(challenge),
-            alternatives: charge_challenges,
-            resource_url: resource_url.to_string(),
-        };
-    }
-
-    // Fall back to x402 if it has a Solana path.
     if let Some(challenge) = x402_challenge {
-        info!(resource = resource_url, "Detected x402 challenge (Solana)");
+        info!(resource = resource_url, "Detected x402 challenge");
         return RunOutcome::X402Challenge {
             challenge: Box::new(challenge),
             resource_url: resource_url.to_string(),
         };
     }
 
-    if let Some(challenge) = x402_siwx_challenge {
-        info!(resource = resource_url, "Detected x402 sign-in challenge");
-        return RunOutcome::X402SignInChallenge {
-            challenge: Box::new(challenge),
-            resource_url: resource_url.to_string(),
-        };
+    // Solana legacy fallback: MPP charge / session / SIWX.
+    #[cfg(feature = "solana")]
+    {
+        let mpp_challenges = mpp::parse_headers(headers);
+
+        // Session MPP: the method field ("solana") indicates chain support.
+        if let Some(challenge) = mpp_challenges
+            .iter()
+            .find(|challenge| challenge.intent.as_str() == "session")
+        {
+            if challenge.method.as_str() == "solana" {
+                info!(
+                    resource = resource_url,
+                    "Detected MPP session challenge (Solana)"
+                );
+                return RunOutcome::SessionChallenge {
+                    challenge: Box::new(challenge.clone()),
+                    resource_url: resource_url.to_string(),
+                };
+            }
+        }
+
+        let mut charge_challenges: Vec<mpp::Challenge> = mpp_challenges
+            .iter()
+            .filter(|challenge| solana_mpp::client::is_solana_charge_challenge(challenge))
+            .cloned()
+            .collect();
+        if !charge_challenges.is_empty() {
+            let challenge = charge_challenges.remove(0);
+            info!(resource = resource_url, "Detected MPP challenge (Solana)");
+            return RunOutcome::MppChallenge {
+                challenge: Box::new(challenge),
+                alternatives: charge_challenges,
+                resource_url: resource_url.to_string(),
+            };
+        }
+
+        if let Some(challenge) = x402::parse_siwx_auth(headers, body) {
+            info!(resource = resource_url, "Detected x402 sign-in challenge");
+            return RunOutcome::X402SignInChallenge {
+                challenge: Box::new(challenge),
+                resource_url: resource_url.to_string(),
+            };
+        }
     }
 
     RunOutcome::UnknownPaymentRequired {

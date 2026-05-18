@@ -4,8 +4,6 @@
 //! `client::x402::build_payment` dispatch can produce an EIP-712 / ERC-3009
 //! `PAYMENT-SIGNATURE` header for `eip155:*` networks.
 
-use solana_x402::exact::PaymentRequirements;
-use solana_x402::{X402_VERSION_V1, X402_VERSION_V2};
 use tracing::info;
 use x402_chain_eip155::{V1Eip155ExactClient, V2Eip155ExactClient};
 use x402_types::proto::{self, OriginalJson, v1, v2};
@@ -17,6 +15,7 @@ use crate::client::x402::{
     BuiltPayment, Challenge, X402_V1_PAYMENT_HEADER, X402_V2_PAYMENT_HEADER,
 };
 use crate::signer::load_evm_signer_for_network;
+use crate::x402_proto::{PaymentRequirements, X402_VERSION_V1, X402_VERSION_V2};
 use crate::{Error, Result};
 
 /// Build an EVM x402 payment header.
@@ -207,8 +206,7 @@ mod tests {
     use super::*;
     use crate::accounts::{Account, AccountsFile, Keystore, MemoryAccountsStore};
     use crate::chain::EvmChainSigner;
-    use solana_x402::X402_VERSION_V2;
-    use solana_x402::exact::PaymentRequirements;
+    use crate::x402_proto::{PaymentRequirements, X402_VERSION_V1, X402_VERSION_V2};
 
     fn sepolia_account(signer: &EvmChainSigner) -> Account {
         Account {
@@ -263,6 +261,7 @@ mod tests {
             x402_version: X402_VERSION_V2,
             requirements: requirements.clone(),
             all_accepts: vec![requirements.clone()],
+            #[cfg(feature = "solana")]
             siwx: None,
         };
 
@@ -282,6 +281,7 @@ mod tests {
             x402_version: X402_VERSION_V2,
             requirements: requirements.clone(),
             all_accepts: vec![requirements.clone()],
+            #[cfg(feature = "solana")]
             siwx: None,
         };
 
@@ -309,9 +309,10 @@ mod tests {
         requirements.network = "eip155:84532".to_string();
         requirements.currency = "0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_string();
         let challenge = Challenge {
-            x402_version: solana_x402::X402_VERSION_V1,
+            x402_version: X402_VERSION_V1,
             requirements: requirements.clone(),
             all_accepts: vec![requirements.clone()],
+            #[cfg(feature = "solana")]
             siwx: None,
         };
 
@@ -334,6 +335,7 @@ mod tests {
             x402_version: 99,
             requirements: requirements.clone(),
             all_accepts: vec![requirements.clone()],
+            #[cfg(feature = "solana")]
             siwx: None,
         };
 

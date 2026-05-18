@@ -1,32 +1,36 @@
 //! x402 protocol support.
 //!
-//! Thin wrapper around `solana_x402::client::exact` for challenge detection
-//! and payment building.
+//! Uses chain-neutral wire types from `crate::x402_proto`. Solana-specific
+//! payment building (SDK calls, SIWX, RPC) is gated behind `feature = "solana"`.
 
-use solana_x402::solana_keychain::SolanaSigner;
-use solana_x402::solana_rpc_client::rpc_client::RpcClient;
-use solana_x402::{
-    PAYMENT_REQUIRED_HEADER, X402_V1_PAYMENT_REQUIRED_HEADER, X402_VERSION_FIELD, X402_VERSION_V1,
-    X402_VERSION_V2,
-    client::exact::{
-        build_payment_header as build_payment_header_v2, build_payment_header_v1,
-        parse_x402_challenge_for_network,
-    },
-    exact::{
-        PaymentRequiredEnvelope, PaymentRequirements, SOLANA_DEVNET, SOLANA_MAINNET,
-        SOLANA_TESTNET, default_rpc_url,
-    },
-    siwx::{
-        SiwxChainSelectionOptions, SiwxExtension, create_siwx_header,
-        siwx_extension_from_payment_required,
-    },
+#[cfg(feature = "solana")]
+use solana_x402::client::exact::{
+    build_payment_header as build_payment_header_v2, build_payment_header_v1,
 };
-use tracing::{info, warn};
+#[cfg(feature = "solana")]
+use solana_x402::exact::default_rpc_url;
+#[cfg(feature = "solana")]
+use solana_x402::siwx::{
+    SiwxChainSelectionOptions, SiwxExtension, create_siwx_header,
+    siwx_extension_from_payment_required,
+};
+#[cfg(feature = "solana")]
+use solana_x402::solana_keychain::SolanaSigner;
+#[cfg(feature = "solana")]
+use solana_x402::solana_rpc_client::rpc_client::RpcClient;
+use tracing::warn;
+#[cfg(feature = "solana")]
+use tracing::info;
 
 use crate::accounts::{AccountsStore, ResolvedEphemeral};
+use crate::x402_proto::{
+    PAYMENT_REQUIRED_HEADER, PaymentRequiredEnvelope, PaymentRequirements, SOLANA_DEVNET,
+    SOLANA_MAINNET, SOLANA_TESTNET, X402_V1_PAYMENT_REQUIRED_HEADER, X402_VERSION_FIELD,
+    X402_VERSION_V1, X402_VERSION_V2, parse_x402_challenge_for_network,
+};
 use crate::{Error, Result};
 
-pub use solana_x402::{SIGN_IN_WITH_X_HEADER, X402_V1_PAYMENT_HEADER, X402_V2_PAYMENT_HEADER};
+pub use crate::x402_proto::{SIGN_IN_WITH_X_HEADER, X402_V1_PAYMENT_HEADER, X402_V2_PAYMENT_HEADER};
 
 #[derive(Debug, Clone)]
 pub struct Challenge {
@@ -39,9 +43,12 @@ pub struct Challenge {
     /// Full `accepts` array from the server's envelope. Used by
     /// `select_best_chain` to dispatch to the right chain family.
     pub all_accepts: Vec<PaymentRequirements>,
+    /// Sign-In With Solana extension (Solana-only; absent without the feature).
+    #[cfg(feature = "solana")]
     pub siwx: Option<SiwxExtension>,
 }
 
+#[cfg(feature = "solana")]
 #[derive(Debug, Clone)]
 pub struct SiwxAuthChallenge {
     pub extension: SiwxExtension,
@@ -67,11 +74,13 @@ pub fn parse(headers: &[(String, String)], body: Option<&str>) -> Option<Challen
         .map(|env| env.accepts)
         .unwrap_or_default();
     let requirements = pick_default_requirement(&all_accepts, headers, body)?;
+    #[cfg(feature = "solana")]
     let siwx = parse_siwx_extension(headers, body).ok().flatten();
     Some(Challenge {
         x402_version: detect_x402_version(headers, body),
         requirements,
         all_accepts,
+        #[cfg(feature = "solana")]
         siwx,
     })
 }
@@ -100,11 +109,12 @@ fn pick_default_requirement(
 }
 
 /// Try to parse an auth-only x402 SIWX challenge.
+#[cfg(feature = "solana")]
 pub fn parse_siwx_auth(
     headers: &[(String, String)],
     body: Option<&str>,
 ) -> Option<SiwxAuthChallenge> {
-    let envelope = parse_payment_required_envelope(headers, body)?;
+    let envelope = parse_payment_required_envelope_for_sdk(headers, body)?;
     if !envelope.accepts.is_empty() {
         return None;
     }
@@ -162,6 +172,48 @@ pub fn build_payment(
         );
     }
 
+    #[cfg(feature = "solana")]
+    {
+        build_solana_payment(
+            challenge,
+            requirements,
+            store,
+            network_override,
+            account_override,
+            resource_url,
+            &selected_cluster,
+            &selected_network,
+        )
+    }
+    #[cfg(not(feature = "solana"))]
+    {
+        let _ = (resource_url, account_override, network_override, store);
+        Err(Error::Config(format!(
+            "Network `{selected_network}` requires Solana support, but this `pay` build does not \
+             include it. Rebuild with `cargo build --features solana`, or ask the gateway for an \
+             EVM (eip155:*) accepts entry."
+        )))
+    }
+}
+
+/// Build a Solana x402 payment via `solana_x402::client::exact`.
+///
+/// Extracted from `build_payment` so EVM-only builds don't have to compile
+/// the Solana SDK call path. `requirements` is our chain-neutral type; we
+/// convert to the SDK's wire type at the boundary via JSON round-trip
+/// (the two structs have identical wire formats).
+#[cfg(feature = "solana")]
+#[allow(clippy::too_many_arguments)]
+fn build_solana_payment(
+    challenge: &Challenge,
+    requirements: &PaymentRequirements,
+    store: &dyn AccountsStore,
+    network_override: Option<&str>,
+    account_override: Option<&str>,
+    resource_url: Option<&str>,
+    selected_cluster: &str,
+    selected_network: &str,
+) -> Result<BuiltPayment> {
     let amount = format_amount(&requirements.amount, &requirements.currency);
     let prompt_context = crate::client::prompt::payment_prompt_context(
         requirements.description.as_deref(),
@@ -175,12 +227,12 @@ pub fn build_payment(
 
     // x402 may carry a recent blockhash, but the current pay-side guard only
     // compares the selected account network against the challenge network.
-    crate::client::mpp::check_client_network_intent(network_override, &selected_cluster, None)?;
+    crate::client::mpp::check_client_network_intent(network_override, selected_cluster, None)?;
 
     // Auto-fund when the user opted into sandbox or the challenge
     // advertises localnet (likely a sandbox gateway without --sandbox).
     let user_opted_into_sandbox = network_override.is_some() || selected_cluster == "localnet";
-    let network = selected_network;
+    let network = selected_network.to_string();
 
     let (signer, ephemeral_notice) = crate::signer::load_signer_for_network_payment_with_intent(
         &network,
@@ -204,6 +256,14 @@ pub fn build_payment(
     );
     tracing::debug!(?requirements, "Full x402 requirements");
 
+    // The SDK takes `&solana_x402::exact::PaymentRequirements`; our type has the
+    // identical wire shape so a JSON round-trip is sufficient and cheap.
+    let sdk_requirements: solana_x402::exact::PaymentRequirements =
+        serde_json::from_value(serde_json::to_value(requirements).map_err(|e| {
+            Error::Mpp(format!("Failed to serialize requirements for SDK: {e}"))
+        })?)
+        .map_err(|e| Error::Mpp(format!("Failed to convert requirements to SDK type: {e}")))?;
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -222,13 +282,13 @@ pub fn build_payment(
     let (payment_header_name, payment_header_value) = match challenge.x402_version {
         X402_VERSION_V1 => {
             let header = rt
-                .block_on(build_payment_header_v1(&signer, &rpc, requirements))
+                .block_on(build_payment_header_v1(&signer, &rpc, &sdk_requirements))
                 .map_err(|e| Error::Mpp(format!("Failed to build x402 payment: {e}")))?;
             (X402_V1_PAYMENT_HEADER, header)
         }
         _ => {
             let header = rt
-                .block_on(build_payment_header_v2(&signer, &rpc, requirements))
+                .block_on(build_payment_header_v2(&signer, &rpc, &sdk_requirements))
                 .map_err(|e| Error::Mpp(format!("Failed to build x402 payment: {e}")))?;
             (X402_V2_PAYMENT_HEADER, header)
         }
@@ -247,6 +307,7 @@ pub fn build_payment(
 }
 
 /// Build a signed x402 SIWX-only retry header.
+#[cfg(feature = "solana")]
 pub fn build_siwx_auth_header(
     challenge: &SiwxAuthChallenge,
     store: &dyn AccountsStore,
@@ -288,6 +349,7 @@ pub fn build_siwx_auth_header(
     })
 }
 
+#[cfg(feature = "solana")]
 fn build_siwx_header(
     challenge: &Challenge,
     signer: &dyn SolanaSigner,
@@ -503,6 +565,7 @@ fn normalize_network(raw: &str) -> String {
     }
 }
 
+#[cfg(feature = "solana")]
 fn siwx_chain_id_for_network(network: &str) -> Option<String> {
     match network {
         "mainnet" | "mainnet-beta" | "solana" => Some(SOLANA_MAINNET.to_string()),
@@ -513,11 +576,12 @@ fn siwx_chain_id_for_network(network: &str) -> Option<String> {
     }
 }
 
+#[cfg(feature = "solana")]
 fn parse_siwx_extension(
     headers: &[(String, String)],
     body: Option<&str>,
 ) -> Result<Option<SiwxExtension>> {
-    let Some(envelope) = parse_payment_required_envelope(headers, body) else {
+    let Some(envelope) = parse_payment_required_envelope_for_sdk(headers, body) else {
         return Ok(None);
     };
     siwx_extension_from_payment_required(&envelope)
@@ -549,6 +613,43 @@ fn parse_payment_required_envelope_header(value: &str) -> Option<PaymentRequired
         .decode(value)
         .ok()?;
     serde_json::from_slice::<PaymentRequiredEnvelope>(&decoded).ok()
+}
+
+/// Re-parse the same headers/body into the Solana SDK's envelope shape.
+///
+/// We keep the public surface on our `crate::x402_proto` types, but the SDK's
+/// SIWX helpers require their own `PaymentRequiredEnvelope`. Rather than
+/// converting (which would duplicate every field), we just re-parse — the
+/// wire bytes haven't moved, and SIWX is a rare path on the Solana hot loop.
+#[cfg(feature = "solana")]
+fn parse_payment_required_envelope_for_sdk(
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Option<solana_x402::exact::PaymentRequiredEnvelope> {
+    use base64::Engine;
+
+    fn from_header(value: &str) -> Option<solana_x402::exact::PaymentRequiredEnvelope> {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .ok()?;
+        serde_json::from_slice::<solana_x402::exact::PaymentRequiredEnvelope>(&decoded).ok()
+    }
+
+    if let Some(value) = header_value(headers, PAYMENT_REQUIRED_HEADER)
+        && let Some(envelope) = from_header(value)
+    {
+        return Some(envelope);
+    }
+
+    if let Some(value) = header_value(headers, X402_V1_PAYMENT_REQUIRED_HEADER)
+        && let Some(envelope) = from_header(value)
+    {
+        return Some(envelope);
+    }
+
+    body.and_then(|body| {
+        serde_json::from_str::<solana_x402::exact::PaymentRequiredEnvelope>(body).ok()
+    })
 }
 
 fn format_amount(amount: &str, currency: &str) -> String {
