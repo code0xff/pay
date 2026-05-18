@@ -68,6 +68,10 @@ pub struct EvmTarget {
     /// Per-chain facilitator. Multiple targets may share one Arc when
     /// the same `facilitator_url` is reused across entries.
     pub facilitator: Arc<FacilitatorClient>,
+    /// Block explorer tx-prefix URL for settlement logs (e.g.
+    /// `"https://polygonscan.com/tx"`). None for built-in chains whose URL
+    /// is derived at the CLI layer via `evm_transaction_link`.
+    pub explorer_url: Option<String>,
 }
 
 /// Resolve `(operator.network + operator.extra_evm_networks)` into a fully-
@@ -130,6 +134,7 @@ pub fn resolve_evm_targets(
             recipient: recipient.to_string(),
             rpc_url: rpc_url.to_string(),
             facilitator: intern_facilitator(facilitator_url),
+            explorer_url: None,
         });
     }
 
@@ -188,6 +193,7 @@ pub fn resolve_evm_targets(
             recipient: recipient.to_string(),
             rpc_url,
             facilitator: intern_facilitator(facilitator_url),
+            explorer_url: extra.explorer_url.clone(),
         });
     }
     Ok(out)
@@ -711,10 +717,15 @@ async fn handle_payment(
         return verification_failed_response(&e);
     }
 
+    let explorer_link = target
+        .explorer_url
+        .as_deref()
+        .map(|base| format!("{base}/{tx_hash}"));
     tracing::info!(
         subdomain = %subdomain,
         path = %path,
         transaction = %tx_hash,
+        explorer = %explorer_link.as_deref().unwrap_or("-"),
         "EVM x402 payment settled + receipt verified — forwarding"
     );
     telemetry::record_payment_collected("x402_evm", subdomain, path, None, &tx_hash);

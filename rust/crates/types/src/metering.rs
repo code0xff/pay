@@ -631,6 +631,12 @@ pub struct EvmNetworkConfig {
     /// per-entry override is for self-hosted single-chain facilitators.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facilitator_url: Option<String>,
+    /// Block explorer base URL for this chain (e.g.
+    /// `"https://polygonscan.com/tx"`). Used in settlement logs so operators
+    /// running custom or lesser-known chains get correct explorer links
+    /// without requiring a code change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explorer_url: Option<String>,
 }
 
 /// Signing backend configuration.
