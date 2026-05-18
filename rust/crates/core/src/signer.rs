@@ -528,7 +528,6 @@ fn load_from_keystore_backend(
 /// 1. Named EVM account in `accounts.yml` (must have `chain_family: evm`).
 /// 2. Lazy-create an ephemeral on EVM testnets only.
 /// 3. Otherwise error with a setup hint.
-#[cfg(feature = "evm")]
 pub fn load_evm_signer_for_network(
     network: &str,
     store: &dyn crate::accounts::AccountsStore,
@@ -617,7 +616,6 @@ pub fn load_evm_signer_for_network(
 /// but for the EVM (32-byte secp256k1) variants. Returns `Err` on platforms
 /// where the requested backend isn't available, or for `Ephemeral` / `File`
 /// which the caller handles directly.
-#[cfg(feature = "evm")]
 fn evm_keystore_backend_for(
     account: &crate::accounts::Account,
 ) -> Result<crate::keystore::Keystore> {
@@ -676,7 +674,6 @@ fn evm_keystore_backend_for(
 }
 
 /// Stable telemetry/error label per EVM keystore backend.
-#[cfg(feature = "evm")]
 fn evm_backend_label(account: &crate::accounts::Account) -> &'static str {
     match account.keystore {
         crate::accounts::Keystore::AppleKeychain => "keychain",

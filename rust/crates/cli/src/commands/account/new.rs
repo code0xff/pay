@@ -38,18 +38,7 @@ pub struct NewCommand {
 impl NewCommand {
     pub fn run(self) -> pay_core::Result<()> {
         if self.chain_family.as_deref() == Some("evm") {
-            #[cfg(feature = "evm")]
-            {
-                return self.run_evm();
-            }
-            #[cfg(not(feature = "evm"))]
-            {
-                return Err(pay_core::Error::Config(
-                    "EVM accounts require the `evm` Cargo feature. Rebuild with \
-                     `cargo build -p pay --features evm`."
-                        .to_string(),
-                ));
-            }
+            return self.run_evm();
         }
 
         let (pubkey, backend_name) = create_account(
@@ -74,7 +63,6 @@ impl NewCommand {
         Ok(())
     }
 
-    #[cfg(feature = "evm")]
     fn run_evm(&self) -> pay_core::Result<()> {
         let network = self.network.as_deref().ok_or_else(|| {
             pay_core::Error::Config(
@@ -503,7 +491,6 @@ pub fn generate_keypair() -> (Vec<u8>, String) {
 /// key under the OS keystore's `evm-key:` entries, and persist the
 /// `chain_family: evm` entry in accounts.yml. Returns `(eip-55 address,
 /// backend_display_name)`.
-#[cfg(feature = "evm")]
 pub fn create_evm_account(
     name: &str,
     network: &str,
@@ -558,7 +545,6 @@ pub fn create_evm_account(
     Ok((address, backend_display))
 }
 
-#[cfg(feature = "evm")]
 fn save_evm_account(
     name: &str,
     network: &str,
@@ -588,7 +574,6 @@ fn save_evm_account(
     accounts.save()
 }
 
-#[cfg(feature = "evm")]
 fn print_evm_next_steps(name: &str, network: &str, address: &str, backend_name: &str) {
     eprintln!();
     eprintln!(

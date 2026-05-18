@@ -157,16 +157,7 @@ impl StartCommand {
         // keypair, settlement via external facilitator) — dispatch to the
         // slim EVM runtime before any Solana-specific scaffolding runs.
         if is_evm_x402_spec(&api) {
-            #[cfg(feature = "evm")]
-            {
-                return super::evm_x402_start::run(&self.bind, api);
-            }
-            #[cfg(not(feature = "evm"))]
-            {
-                return Err(pay_core::Error::Config(
-                    "This spec selects `protocol: x402` on an EVM network, but the binary was built without the `evm` feature. Rebuild with `cargo build --features evm`.".to_string(),
-                ));
-            }
+            return super::evm_x402_start::run(&self.bind, api);
         }
 
         // Optional OpenAPI / Discovery doc — loaded once, filtered to the

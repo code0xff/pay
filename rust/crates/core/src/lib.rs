@@ -9,7 +9,6 @@ pub mod skills;
 
 // EVM chain abstraction — gated behind the `evm` Cargo feature so the
 // Solana-only build pulls zero alloy / x402-chain-eip155 transitive crates.
-#[cfg(feature = "evm")]
 pub mod chain;
 
 // Client modules (CLI)
@@ -82,7 +81,6 @@ pub trait PaymentState: Clone + Send + Sync + 'static {
     /// state flipping to `true`. `None` for Solana-only gateways. The EVM
     /// x402 middleware requires `Some(...)` and will fail closed when the
     /// gateway forgot to wire it.
-    #[cfg(feature = "evm")]
     fn evm_in_flight(&self) -> Option<&server::in_flight::InFlight> {
         None
     }
@@ -94,7 +92,6 @@ pub trait PaymentState: Clone + Send + Sync + 'static {
     /// When non-empty, the first entry is treated as the *primary* chain
     /// (back-compat with the legacy single-chain `facilitator(&self)`
     /// getter, which still returns this entry's facilitator).
-    #[cfg(feature = "evm")]
     fn evm_targets(&self) -> &[server::evm_x402_payment::EvmTarget] {
         &[]
     }

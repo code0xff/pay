@@ -3,13 +3,6 @@
 //! New protocols plug in by implementing `ChainSigner`.
 //! Existing Solana code continues to use `MemorySigner` directly; this
 //! module is only used by the x402 multi-chain dispatch path.
-//!
-//! The entire module is gated behind the `evm` Cargo feature; the
-//! Solana-only build does not include any of these types. The file-level
-//! `#![cfg]` below mirrors the `mod` gate in `lib.rs` so a stray
-//! `pub use crate::chain::…` in Solana-only code surfaces immediately
-//! at the source rather than as a confusing missing-module error.
-#![cfg(feature = "evm")]
 
 use crate::{Error, Result};
 // Brings `with_chain_id` into scope for `PrivateKeySigner`.

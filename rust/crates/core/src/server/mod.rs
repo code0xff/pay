@@ -15,10 +15,10 @@ pub mod x402_facilitator;
 #[cfg(feature = "server")]
 pub mod x402_payment;
 
-#[cfg(all(feature = "server", feature = "evm"))]
+#[cfg(feature = "server")]
 pub mod evm_x402_payment;
 
-#[cfg(all(feature = "server", feature = "evm"))]
+#[cfg(feature = "server")]
 pub mod in_flight;
 
 #[cfg(feature = "server")]

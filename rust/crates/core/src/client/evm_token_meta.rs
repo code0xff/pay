@@ -12,7 +12,6 @@
 //! per token pays one extra `eth_call` round trip; every subsequent
 //! request reads from the cache.
 
-#![cfg(feature = "evm")]
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

@@ -12,7 +12,7 @@
 //! - `PAY_BASE_SEPOLIA_RPC_URL` — alternate Base-Sepolia endpoint
 //! - `PAY_EVM_TEST_ADDRESS` — funded test wallet (defaults to burn address)
 
-#![cfg(all(feature = "evm", feature = "network_tests"))]
+#![cfg(feature = "network_tests")]
 
 use pay_core::client::balance::get_evm_balances;
 

@@ -85,7 +85,6 @@ fn pick_default_requirement(
     headers: &[(String, String)],
     body: Option<&str>,
 ) -> Option<PaymentRequirements> {
-    #[cfg(feature = "evm")]
     {
         if let Some(r) = all_accepts
             .iter()
@@ -154,23 +153,13 @@ pub fn build_payment(
         .unwrap_or_else(|| selected_cluster.clone());
 
     if crate::accounts::is_evm_network_family(&selected_network) {
-        #[cfg(feature = "evm")]
-        {
-            return crate::client::evm::build_evm_payment(
-                challenge,
-                requirements,
-                &selected_network,
-                store,
-                account_override,
-            );
-        }
-        #[cfg(not(feature = "evm"))]
-        {
-            return Err(Error::Config(format!(
-                "Network `{selected_network}` requires EVM support. \
-                 Rebuild with `cargo build --features evm`."
-            )));
-        }
+        return crate::client::evm::build_evm_payment(
+            challenge,
+            requirements,
+            &selected_network,
+            store,
+            account_override,
+        );
     }
 
     let amount = format_amount(&requirements.amount, &requirements.currency);
@@ -338,11 +327,12 @@ fn build_siwx_header(
 ///      normalized network slug or `cluster` matches.
 ///   2. Entries whose normalized network has *any* account configured
 ///      in `accounts.yml`.
-///   3. **EVM-first** (`cfg(feature = "evm")` only): EVM entries. The
-///      user opted into EVM at build time so EVM is the default routing
-///      target when nothing more specific matched.
-///   4. Non-EVM entries (Solana preference — covers the Solana-only
-///      build and the "no accounts at all" first-run case).
+///   3. **EVM-first**: EVM entries. Since Phase 20 EVM/x402 is the
+///      primary protocol (unconditional compile), so EVM is the default
+///      routing target when nothing more specific matched.
+///   4. Non-EVM entries (Solana preference — `cfg(feature = "solana")`
+///      only; covers mixed-chain envelopes and the "no accounts at all"
+///      first-run case for Solana-included builds).
 ///   5. All remaining entries.
 ///
 /// Currency tiebreak (applied within the priority-step's survivors):
@@ -410,7 +400,6 @@ pub fn select_best_chain<'a>(
         }
     }
 
-    #[cfg(feature = "evm")]
     {
         let matches: Vec<_> = accepts
             .iter()
@@ -460,7 +449,6 @@ fn currency_preference(symbol: &str) -> u8 {
 /// caller can fall back to the SDK-provided order rather than a
 /// guess-and-pick that might pick the wrong asset.
 fn currency_symbol_for(r: &PaymentRequirements) -> Option<String> {
-    #[cfg(feature = "evm")]
     {
         if let Some(chain_id_str) = r.network.strip_prefix("eip155:")
             && let Ok(chain_id) = chain_id_str.parse::<u64>()
@@ -1264,7 +1252,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn parse_prefers_evm_entry_when_evm_feature_on() {
         // Multi-chain envelope: parse() should surface the EVM accept as
         // the legacy single `requirements` slot under the evm feature, so
@@ -1281,7 +1268,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn select_best_chain_prefers_evm_under_evm_feature() {
         // No accounts configured: EVM-first priority should kick in and
         // route to the EVM entry rather than the historical Solana
@@ -1294,7 +1280,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn select_best_chain_solana_account_still_wins_over_evm_first() {
         // Priority 2 (configured-account match) outranks Phase 16's
         // EVM-first default, so a Solana-only user with a configured
@@ -1332,25 +1317,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn select_best_chain_override_wins_over_evm_first() {
         // CLI --network override is always priority 1 — verify EVM-first
         // doesn't shadow an explicit Solana choice.
         let store = MemoryAccountsStore::new();
         let accepts = vec![solana_accept(), evm_accept()];
         let chosen = select_best_chain(&accepts, &store, Some("mainnet"), None).expect("pick");
-        assert!(chosen.network.starts_with("solana:"));
-    }
-
-    #[test]
-    #[cfg(not(feature = "evm"))]
-    fn select_best_chain_solana_only_build_unchanged() {
-        // Solana-only build: EVM-first branch is compiled out, so the
-        // EVM entry is ignored and Solana wins by the legacy non-EVM
-        // preference. (Mirrors pre-Phase-16 behaviour.)
-        let store = MemoryAccountsStore::new();
-        let accepts = vec![evm_accept(), solana_accept()];
-        let chosen = select_best_chain(&accepts, &store, None, None).expect("pick");
         assert!(chosen.network.starts_with("solana:"));
     }
 
@@ -1370,7 +1342,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn select_best_chain_prefers_usdc_over_usdt_by_default() {
         // Same chain (Base), two currencies; with no --currency override the
         // default order picks USDC even though USDT comes first in accepts.
@@ -1391,7 +1362,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn select_best_chain_currency_override_wins_over_default() {
         let store = MemoryAccountsStore::new();
         // Both same chain (Base): USDC + a generic short ticker stand-in.
@@ -1407,7 +1377,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn select_best_chain_currency_override_does_not_cross_chains() {
         // User configured Solana wallet, override asks for USDT, but
         // Solana entry uses USDC. The configured-account priority must

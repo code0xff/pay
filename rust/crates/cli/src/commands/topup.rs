@@ -1,4 +1,3 @@
-#[cfg(feature = "evm")]
 use owo_colors::OwoColorize;
 
 use crate::{components, network::SolanaNetwork};
@@ -22,16 +21,7 @@ impl TopupCommand {
         if let Some(slug) = network_override
             && pay_core::accounts::is_evm_network_family(slug)
         {
-            #[cfg(feature = "evm")]
-            {
-                return run_evm_topup(slug, self.account.as_deref());
-            }
-            #[cfg(not(feature = "evm"))]
-            {
-                return Err(pay_core::Error::Config(format!(
-                    "`pay topup --network {slug}` requires the `evm` Cargo feature."
-                )));
-            }
+            return run_evm_topup(slug, self.account.as_deref());
         }
 
         let config = pay_core::Config::load().unwrap_or_default();
@@ -144,7 +134,6 @@ pub(crate) fn topup_received_amount(
 /// Hint string mapped by EVM network slug — testnet faucets get explicit
 /// URLs; mainnets fall back to a generic wallet-or-exchange note since pay
 /// doesn't itself broker fiat-on-ramp for EVM yet.
-#[cfg(feature = "evm")]
 fn evm_funding_hint(network: &str) -> &'static str {
     match network {
         "sepolia" => "Sepolia faucet: https://www.alchemy.com/faucets/ethereum-sepolia",
@@ -154,7 +143,6 @@ fn evm_funding_hint(network: &str) -> &'static str {
     }
 }
 
-#[cfg(feature = "evm")]
 fn run_evm_topup(network: &str, account_override: Option<&str>) -> pay_core::Result<()> {
     use std::time::{Duration, Instant};
 
@@ -253,7 +241,6 @@ fn run_evm_topup(network: &str, account_override: Option<&str>) -> pay_core::Res
     Ok(())
 }
 
-#[cfg(feature = "evm")]
 fn usdc_raw_amount(balances: pay_core::client::balance::AccountBalances) -> Option<u64> {
     balances
         .tokens
@@ -282,7 +269,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "evm")]
     #[test]
     fn evm_funding_hint_uses_known_faucet_for_sepolia() {
         let hint = evm_funding_hint("sepolia");
@@ -290,7 +276,6 @@ mod tests {
         assert!(hint.contains("https://"));
     }
 
-    #[cfg(feature = "evm")]
     #[test]
     fn evm_funding_hint_falls_back_to_wallet_note_for_mainnet() {
         // Mainnet EVMs don't have a faucet; the hint should redirect the

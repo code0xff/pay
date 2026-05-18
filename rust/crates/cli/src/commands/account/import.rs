@@ -42,18 +42,7 @@ pub struct ImportCommand {
 impl ImportCommand {
     pub fn run(self) -> pay_core::Result<()> {
         if self.chain_family.as_deref() == Some("evm") {
-            #[cfg(feature = "evm")]
-            {
-                return self.run_evm();
-            }
-            #[cfg(not(feature = "evm"))]
-            {
-                return Err(pay_core::Error::Config(
-                    "EVM imports require the `evm` Cargo feature. Rebuild with \
-                     `cargo build -p pay --features evm`."
-                        .to_string(),
-                ));
-            }
+            return self.run_evm();
         }
 
         let theme = ColorfulTheme::default();
@@ -182,7 +171,6 @@ impl ImportCommand {
 }
 
 impl ImportCommand {
-    #[cfg(feature = "evm")]
     fn run_evm(self) -> pay_core::Result<()> {
         use pay_core::chain::{ChainFamily, ChainSigner, EvmChainSigner};
 
@@ -310,7 +298,6 @@ impl ImportCommand {
     }
 }
 
-#[cfg(feature = "evm")]
 fn display_evm_balance(network: &str, address: &str) {
     // The EVM balance fetch is async and the surrounding command is
     // synchronous, so spin up a small runtime. The user already paid a

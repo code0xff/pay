@@ -60,7 +60,6 @@ pub fn print_account_list(
 
     enum BalanceJobResult {
         Solana(std::collections::HashMap<String, pay_core::client::balance::AccountBalances>),
-        #[cfg(feature = "evm")]
         Evm {
             address: String,
             result: pay_core::Result<pay_core::client::balance::AccountBalances>,
@@ -108,16 +107,12 @@ pub fn print_account_list(
                     BalanceJobResult::Solana(map)
                 });
             }
-            #[cfg(feature = "evm")]
             for (network, address) in evm_lookups.clone() {
                 set.spawn(async move {
                     let result = pay_core::balance::get_evm_balances(&network, &address).await;
                     BalanceJobResult::Evm { address, result }
                 });
             }
-            // Silence unused warning when `evm` is disabled.
-            #[cfg(not(feature = "evm"))]
-            let _ = &evm_lookups;
             let mut out = Vec::new();
             while let Some(Ok(results)) = set.join_next().await {
                 out.push(results);
@@ -131,7 +126,6 @@ pub fn print_account_list(
                         balance_cache.insert(pk, Some(bal));
                     }
                 }
-                #[cfg(feature = "evm")]
                 BalanceJobResult::Evm { address, result } => match result {
                     Ok(bal) => {
                         balance_cache.insert(address, Some(bal));

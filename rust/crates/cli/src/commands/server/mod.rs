@@ -2,7 +2,6 @@ pub mod demo;
 pub mod scaffold;
 pub mod start;
 
-#[cfg(feature = "evm")]
 pub mod evm_x402_start;
 
 use clap::Subcommand;

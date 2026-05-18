@@ -13,7 +13,6 @@
 //! - Gas is paid in ETH separately from the stablecoin amount, so subtracting
 //!   the "fee" from `amount` is meaningless.
 
-#![cfg(feature = "evm")]
 
 use crate::Result;
 use crate::client::balance::{evm_rpc_url, evm_stablecoin_address, evm_stablecoin_decimals};

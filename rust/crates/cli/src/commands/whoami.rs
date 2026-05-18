@@ -100,16 +100,7 @@ impl WhoamiCommand {
         let is_evm = pay_core::accounts::is_evm_network_family(network) || account.is_evm();
         let balance_result: pay_core::Result<pay_core::client::balance::AccountBalances> = if is_evm
         {
-            #[cfg(feature = "evm")]
-            {
-                rt.block_on(pay_core::balance::get_evm_balances(network, pubkey))
-            }
-            #[cfg(not(feature = "evm"))]
-            {
-                Err(pay_core::Error::Config(
-                    "EVM balance lookup requires `--features evm`.".to_string(),
-                ))
-            }
+            rt.block_on(pay_core::balance::get_evm_balances(network, pubkey))
         } else {
             rt.block_on(pay_core::balance::get_stablecoin_balances(&rpc_url, pubkey))
         };

@@ -2,10 +2,7 @@
 //!
 //! Wraps the official Coinbase `x402-chain-eip155` V2 client so the multi-chain
 //! `client::x402::build_payment` dispatch can produce an EIP-712 / ERC-3009
-//! `PAYMENT-SIGNATURE` header for `eip155:*` networks. The module is only
-//! compiled under the `evm` Cargo feature; the Solana payment path never
-//! touches it.
-#![cfg(feature = "evm")]
+//! `PAYMENT-SIGNATURE` header for `eip155:*` networks.
 
 use solana_x402::exact::PaymentRequirements;
 use solana_x402::{X402_VERSION_V1, X402_VERSION_V2};

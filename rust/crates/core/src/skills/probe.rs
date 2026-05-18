@@ -92,7 +92,6 @@ fn amount_to_usd(amount_str: &str, decimals: u8) -> Option<f64> {
 fn pick_indexable_x402<'a>(
     candidates: &'a [solana_x402::exact::PaymentRequirements],
 ) -> Option<&'a solana_x402::exact::PaymentRequirements> {
-    #[cfg(feature = "evm")]
     {
         if let Some(r) = candidates
             .iter()
@@ -130,7 +129,6 @@ fn resolve_offer(network: &str, asset: &str) -> Option<(String, String, u8)> {
         let decimals = decimals_for(&symbol);
         return Some((caip2, symbol, decimals));
     }
-    #[cfg(feature = "evm")]
     {
         if let Some(chain_id_str) = network.strip_prefix("eip155:")
             && let Ok(chain_id) = chain_id_str.parse::<u64>()
@@ -873,7 +871,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn extract_indexes_base_only_accepts_under_evm_feature() {
         // Phase 15: an EVM-only x402 envelope (Base USDC) is now indexable;
         // it shows up in `chain_offers` with the eip155 CAIP-2 network and
@@ -895,25 +892,6 @@ mod tests {
         assert_eq!(offer.network, "eip155:8453");
         assert_eq!(offer.currency, "USDC");
         assert_eq!(offer.amount_raw, "10000");
-    }
-
-    #[test]
-    #[cfg(not(feature = "evm"))]
-    fn extract_skips_base_only_accepts_in_solana_only_build() {
-        // Without the `evm` feature the reverse-lookup table doesn't exist,
-        // so EVM accepts are silently skipped (same outcome as pre-Phase-15).
-        let body = x402_body(vec![serde_json::json!({
-            "scheme": "exact",
-            "network": "eip155:8453",
-            "amount": "10000",
-            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-            "payTo": "0x000000",
-        })]);
-        let paid = extract_paid_endpoint(&[], Some(&body));
-        assert!(paid.protocols.is_empty());
-        assert!(paid.supported_usd.is_empty());
-        assert_eq!(paid.price_usd, None);
-        assert!(paid.chain_offers.is_empty());
     }
 
     #[test]
@@ -1051,7 +1029,6 @@ mod tests {
     // ── Phase 15 — multi-chain index publication ─────────────────────────
 
     #[test]
-    #[cfg(feature = "evm")]
     fn extract_merges_solana_and_evm_offers_into_chain_offers() {
         // A multichain endpoint advertising Solana USDC + Base USDC should
         // produce two chain_offers (one per network) but a single union
@@ -1089,7 +1066,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn extract_skips_unknown_evm_token() {
         // A random ERC-20 address we don't know shouldn't pollute the index
         // — chain_offers stays empty, no protocol claimed.
@@ -1107,7 +1083,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn classify_outcome_accepts_evm_only_x402_when_stable_known() {
         // Pre-Phase-15 this returned `WrongChain`; Phase 15 indexes it as
         // `Ok` with the eip155 CAIP-2 surfaced via `network`.
@@ -1158,11 +1133,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "evm")]
     fn classify_outcome_prefers_evm_when_envelope_offers_both() {
-        // EVM-first under `cfg(feature = "evm")` — when an envelope offers
-        // both Solana and Base, the probe surfaces the Base entry as the
-        // primary `ProbeStatus::Ok::network`.
+        // EVM-first: when an envelope offers both Solana and Base, the
+        // probe surfaces the Base entry as the primary `ProbeStatus::Ok::network`.
         use crate::client::runner::RunOutcome;
         use solana_x402::exact::PaymentRequirements;
         let solana_req = PaymentRequirements {

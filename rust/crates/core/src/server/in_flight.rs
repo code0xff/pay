@@ -27,7 +27,6 @@
 //! entries. There is no LRU eviction, so a flood of fake envelopes cannot
 //! evict a real entry to clear the way for a replay.
 
-#![cfg(feature = "evm")]
 
 use std::collections::HashSet;
 use std::sync::Arc;

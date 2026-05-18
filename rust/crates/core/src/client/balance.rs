@@ -406,13 +406,11 @@ async fn rpc_call(
 // EVM callers must dispatch to `get_evm_balances` explicitly with a network
 // slug, since the RPC URL alone is not enough to distinguish chain families.
 
-#[cfg(feature = "evm")]
 pub use evm_balances::{
     evm_default_rpc_url, evm_rpc_url, evm_stablecoin_address, evm_stablecoin_decimals,
     evm_symbol_for, get_evm_balances,
 };
 
-#[cfg(feature = "evm")]
 mod evm_balances {
     use super::{AccountBalances, TokenBalance};
     use alloy::primitives::{Address, U256, utils::format_units};

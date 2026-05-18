@@ -206,7 +206,6 @@ impl Account {
 
     /// Decoded 32-byte EVM private key for EVM ephemeral accounts. Returns
     /// `None` for non-EVM accounts or when `secret_key_hex` is missing.
-    #[cfg(feature = "evm")]
     pub fn evm_key_bytes(&self) -> Option<Vec<u8>> {
         if !self.is_evm() {
             return None;
@@ -618,17 +617,7 @@ pub fn load_or_create_exact_ephemeral_for_network_as(
 
 fn generate_ephemeral_account_for_network(network: &str) -> Result<Account> {
     if is_evm_network_family(network) {
-        #[cfg(feature = "evm")]
-        {
-            return Ok(generate_evm_ephemeral_account(network));
-        }
-        #[cfg(not(feature = "evm"))]
-        {
-            return Err(Error::Config(format!(
-                "Network `{network}` requires EVM support, but this `pay` build does not include \
-                 it. Rebuild with `cargo build --features evm`."
-            )));
-        }
+        return Ok(generate_evm_ephemeral_account(network));
     }
     Ok(generate_solana_ephemeral_account())
 }
@@ -654,7 +643,6 @@ fn generate_solana_ephemeral_account() -> Account {
     }
 }
 
-#[cfg(feature = "evm")]
 fn generate_evm_ephemeral_account(network: &str) -> Account {
     use crate::chain::{ChainFamily, ChainSigner, EvmChainSigner};
 
@@ -1323,7 +1311,6 @@ pubkey: SomePubkey
         assert!(!is_evm_lazy_network("base"));
     }
 
-    #[cfg(feature = "evm")]
     #[test]
     fn evm_ephemeral_generated_for_sepolia() {
         let store = MemoryAccountsStore::new();
@@ -1337,7 +1324,6 @@ pubkey: SomePubkey
         assert!(pk.starts_with("0x") && pk.len() == 42);
     }
 
-    #[cfg(feature = "evm")]
     #[test]
     fn evm_key_bytes_roundtrip() {
         let store = MemoryAccountsStore::new();
@@ -1346,15 +1332,4 @@ pubkey: SomePubkey
         assert_eq!(bytes.len(), 32);
     }
 
-    #[cfg(not(feature = "evm"))]
-    #[test]
-    fn evm_network_without_feature_returns_clear_error() {
-        let store = MemoryAccountsStore::new();
-        let err = load_or_create_ephemeral_for_network("sepolia", &store).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("requires EVM support") && msg.contains("--features evm"),
-            "expected EVM-feature guidance, got: {msg}"
-        );
-    }
 }

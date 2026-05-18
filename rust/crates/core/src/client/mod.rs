@@ -1,7 +1,5 @@
 pub mod balance;
-#[cfg(feature = "evm")]
 pub mod evm;
-#[cfg(feature = "evm")]
 pub mod evm_token_meta;
 pub mod fetch;
 pub mod mpp;
@@ -9,7 +7,6 @@ pub(crate) mod prompt;
 pub mod runner;
 pub mod sandbox;
 pub mod send;
-#[cfg(feature = "evm")]
 pub mod send_evm;
 pub mod session;
 pub mod x402;

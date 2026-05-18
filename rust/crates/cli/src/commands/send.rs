@@ -70,27 +70,17 @@ impl SendCommand {
         // Phase 12-3: route EVM networks to the alloy-based ERC-20 transfer
         // path. The Solana flow below is left untouched.
         if pay_core::accounts::is_evm_network_family(network) {
-            #[cfg(feature = "evm")]
-            {
-                return run_evm_send(
-                    &amount,
-                    &recipient_input,
-                    self.currency.as_deref(),
-                    self.memo.as_deref(),
-                    self.memo_hex.as_deref(),
-                    self.fee_within,
-                    network,
-                    account_override,
-                    verbose,
-                );
-            }
-            #[cfg(not(feature = "evm"))]
-            {
-                return Err(pay_core::Error::Config(format!(
-                    "`pay send --network {network}` requires the `evm` Cargo \
-                     feature. Rebuild with `cargo build -p pay --features evm`."
-                )));
-            }
+            return run_evm_send(
+                &amount,
+                &recipient_input,
+                self.currency.as_deref(),
+                self.memo.as_deref(),
+                self.memo_hex.as_deref(),
+                self.fee_within,
+                network,
+                account_override,
+                verbose,
+            );
         }
 
         let rpc_url = configured_rpc_url(&config);
@@ -144,7 +134,6 @@ impl SendCommand {
     }
 }
 
-#[cfg(feature = "evm")]
 #[allow(clippy::too_many_arguments)]
 fn run_evm_send(
     amount: &str,
@@ -861,32 +850,6 @@ mod tests {
         };
 
         assert_eq!(send_success_title(&result), "Sent 1 USDC to to");
-    }
-
-    #[cfg(not(feature = "evm"))]
-    #[test]
-    fn send_reports_missing_evm_feature_for_evm_slugs() {
-        for slug in ["ethereum", "base", "sepolia", "base-sepolia", "holesky"] {
-            let err = SendCommand {
-                amount: "1".to_string(),
-                recipient: "0x0000000000000000000000000000000000000001".to_string(),
-                currency: Some("USDC".to_string()),
-                memo: None,
-                memo_hex: None,
-                fee_within: false,
-            }
-            .run(Some(slug), None, false)
-            .unwrap_err();
-            let msg = err.to_string();
-            assert!(
-                msg.contains("requires the `evm` Cargo feature"),
-                "missing feature-gate message for {slug}: {msg}"
-            );
-            assert!(
-                msg.contains(slug),
-                "feature-gate message should echo the slug `{slug}`: {msg}"
-            );
-        }
     }
 
     #[test]
