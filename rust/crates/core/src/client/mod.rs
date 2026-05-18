@@ -2,11 +2,15 @@ pub mod balance;
 pub mod evm;
 pub mod evm_token_meta;
 pub mod fetch;
+#[cfg(feature = "solana")]
 pub mod mpp;
 pub(crate) mod prompt;
 pub mod runner;
+#[cfg(feature = "solana")]
 pub mod sandbox;
+#[cfg(feature = "solana")]
 pub mod send;
 pub mod send_evm;
+#[cfg(feature = "solana")]
 pub mod session;
 pub mod x402;

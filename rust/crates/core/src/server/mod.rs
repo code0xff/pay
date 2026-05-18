@@ -6,13 +6,13 @@ pub mod metering;
 #[cfg(feature = "server")]
 pub mod openapi;
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", feature = "solana"))]
 pub mod payment;
 
 #[cfg(feature = "server")]
 pub mod x402_facilitator;
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", feature = "solana"))]
 pub mod x402_payment;
 
 #[cfg(feature = "server")]
@@ -24,7 +24,7 @@ pub mod in_flight;
 #[cfg(feature = "server")]
 pub mod proxy;
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", feature = "solana"))]
 pub mod session;
 
 #[cfg(feature = "server")]
