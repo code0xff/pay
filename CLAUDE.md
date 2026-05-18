@@ -308,6 +308,43 @@ cargo tree -p pay-core | grep -c alloy
 
 ---
 
+## 작업 프로세스 룰
+
+### 사전조사-우선 (research-before-implementation)
+
+새 Phase 또는 외부 SDK/스펙 의존 작업을 시작할 때:
+
+1. **Phase 설계 문서에 "사전 조사 항목" 섹션이 있으면, 구현 코드 한 줄
+   쓰기 전에 반드시 그 항목들을 먼저 답한다.**
+2. 사전조사 결과는 같은 design 문서에 "사전조사 결과" 섹션으로
+   기록하고 commit 한 뒤에야 구현 진입.
+3. *"SDK 에 해당 모듈이 존재함"* 같은 1줄 확인은 **사전조사 아님** —
+   가능성 확인일 뿐이다. 사전조사는:
+   - 외부 spec (공식 문서, RFC, reference impl) 의 wire format 확인
+   - SDK 의 *공개 API 표면* + *입력 타입 shape* 확인 (필드명, 필수/선택,
+     enum variant 등)
+   - 우리 코드가 SDK 에 넘기게 될 JSON/struct 의 *정확한 모양* 확인
+4. 사용자가 "그냥 진행해줘" 라고 해도, design 문서에 사전조사 섹션이
+   있으면 **"사전조사부터 보고드릴까요?"** 를 한 번 더 확인.
+5. 사전조사 결과 design 의 가정이 틀린 경우 — design 을 먼저 수정한
+   뒤 구현으로 넘어간다.
+
+> Phase 14 (x402 v1 EVM) 에서 본 룰을 어겨서 발견한 결과: SDK 의
+> `v1_eip155_exact` 모듈이 존재한다는 사실은 확인했지만, v1 의
+> `PaymentRequirements` field set (`maxAmountRequired` / `resource` /
+> `description`) 과 short network name 요구를 사전에 놓쳐서 첫 테스트
+> 에서 compile/runtime 에러로 발견. 시간 손해 작아 보였지만, 다른
+> 스펙이었으면 전체 구현 폐기 위험이 있었다.
+
+### Phase 분리
+
+- 한 phase 의 변경 범위가 5+ 파일이거나 schema/trait 시그니처를 깨면
+  별도 phase 로 쪼개고 design 문서를 먼저 작성.
+- 설계 문서 없는 즉흥 변경은 (1) 리뷰 fix, (2) 사전조사 결과 반영,
+  (3) 작은 회귀 수정에 한정.
+
+---
+
 ## 핵심 설계 원칙
 
 1. **기존 Solana 경로 불변** — MPP, Session, Solana x402 코드 경로를 변경하지 않는다.
