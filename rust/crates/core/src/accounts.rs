@@ -179,8 +179,11 @@ impl Account {
     }
 
     /// Convenience: returns the inline secret bytes for an ephemeral
-    /// account, decoded from base58. Returns `None` for non-ephemeral
-    /// accounts (which don't store the secret in this file).
+    /// Solana account, decoded from base58. Returns `None` for non-ephemeral
+    /// accounts (which don't store the secret in this file), and is only
+    /// compiled with the `solana` feature since `secret_key_b58` is a
+    /// Solana-specific encoding.
+    #[cfg(feature = "solana")]
     pub fn ephemeral_keypair_bytes(&self) -> Option<Vec<u8>> {
         if self.keystore != Keystore::Ephemeral {
             return None;
@@ -619,9 +622,20 @@ fn generate_ephemeral_account_for_network(network: &str) -> Result<Account> {
     if is_evm_network_family(network) {
         return Ok(generate_evm_ephemeral_account(network));
     }
-    Ok(generate_solana_ephemeral_account())
+    #[cfg(feature = "solana")]
+    {
+        Ok(generate_solana_ephemeral_account())
+    }
+    #[cfg(not(feature = "solana"))]
+    {
+        Err(Error::Config(format!(
+            "Network `{network}` requires Solana support, but this `pay` build does not include \
+             it. Rebuild with `cargo build --features solana`."
+        )))
+    }
 }
 
+#[cfg(feature = "solana")]
 fn generate_solana_ephemeral_account() -> Account {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let verifying_key = signing_key.verifying_key();

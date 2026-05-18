@@ -14,39 +14,55 @@ use zeroize::Zeroizing;
 /// Identifies the on-chain ecosystem for a given account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainFamily {
+    /// Solana cluster. Only present when the `solana` Cargo feature is on.
+    #[cfg(feature = "solana")]
     Solana,
+    /// EVM chain identified by its CAIP-2 chain id.
     Evm { chain_id: u64 },
+    /// Unrecognized network slug. Returned by `from_network_slug` when the
+    /// `solana` feature is off and the input would otherwise have mapped to
+    /// a Solana cluster (e.g. "mainnet", "devnet"). Callers match on `_` to
+    /// surface a "network not supported" error.
+    Unknown,
 }
 
 impl ChainFamily {
     /// Parse a network slug (accounts.yml key) into a ChainFamily.
     pub fn from_network_slug(slug: &str) -> Self {
         match slug {
-            "mainnet" | "devnet" | "testnet" | "localnet" => ChainFamily::Solana,
-            "ethereum" => ChainFamily::Evm { chain_id: 1 },
-            "base" => ChainFamily::Evm { chain_id: 8453 },
-            "optimism" => ChainFamily::Evm { chain_id: 10 },
-            "arbitrum" => ChainFamily::Evm { chain_id: 42161 },
-            "polygon" => ChainFamily::Evm { chain_id: 137 },
-            "avalanche" => ChainFamily::Evm { chain_id: 43114 },
-            "linea" => ChainFamily::Evm { chain_id: 59144 },
-            "sepolia" => ChainFamily::Evm { chain_id: 11155111 },
-            "holesky" => ChainFamily::Evm { chain_id: 17000 },
-            "base-sepolia" => ChainFamily::Evm { chain_id: 84532 },
-            "amoy" => ChainFamily::Evm { chain_id: 80002 },
-            other => {
-                if let Some(id_str) = other.strip_prefix("eip155:")
-                    && let Ok(id) = id_str.parse::<u64>()
-                {
-                    return ChainFamily::Evm { chain_id: id };
-                }
-                ChainFamily::Solana
-            }
+            #[cfg(feature = "solana")]
+            "mainnet" | "devnet" | "testnet" | "localnet" => return ChainFamily::Solana,
+            "ethereum" => return ChainFamily::Evm { chain_id: 1 },
+            "base" => return ChainFamily::Evm { chain_id: 8453 },
+            "optimism" => return ChainFamily::Evm { chain_id: 10 },
+            "arbitrum" => return ChainFamily::Evm { chain_id: 42161 },
+            "polygon" => return ChainFamily::Evm { chain_id: 137 },
+            "avalanche" => return ChainFamily::Evm { chain_id: 43114 },
+            "linea" => return ChainFamily::Evm { chain_id: 59144 },
+            "sepolia" => return ChainFamily::Evm { chain_id: 11155111 },
+            "holesky" => return ChainFamily::Evm { chain_id: 17000 },
+            "base-sepolia" => return ChainFamily::Evm { chain_id: 84532 },
+            "amoy" => return ChainFamily::Evm { chain_id: 80002 },
+            _ => {}
+        }
+        if let Some(id_str) = slug.strip_prefix("eip155:")
+            && let Ok(id) = id_str.parse::<u64>()
+        {
+            return ChainFamily::Evm { chain_id: id };
+        }
+        #[cfg(feature = "solana")]
+        {
+            ChainFamily::Solana
+        }
+        #[cfg(not(feature = "solana"))]
+        {
+            ChainFamily::Unknown
         }
     }
 
     /// Parse a CAIP-2 chain identifier into a ChainFamily.
     pub fn from_caip2(caip2: &str) -> Option<Self> {
+        #[cfg(feature = "solana")]
         if caip2.starts_with("solana:") {
             return Some(ChainFamily::Solana);
         }
@@ -60,6 +76,7 @@ impl ChainFamily {
     /// Convert to a pay-internal network slug.
     pub fn to_network_slug(&self) -> &'static str {
         match self {
+            #[cfg(feature = "solana")]
             ChainFamily::Solana => "mainnet",
             ChainFamily::Evm { chain_id: 1 } => "ethereum",
             ChainFamily::Evm { chain_id: 8453 } => "base",
@@ -73,6 +90,7 @@ impl ChainFamily {
             ChainFamily::Evm { chain_id: 84532 } => "base-sepolia",
             ChainFamily::Evm { chain_id: 80002 } => "amoy",
             ChainFamily::Evm { .. } => "evm-unknown",
+            ChainFamily::Unknown => "unknown",
         }
     }
 
@@ -81,7 +99,10 @@ impl ChainFamily {
     }
 
     pub fn is_solana(&self) -> bool {
-        matches!(self, ChainFamily::Solana)
+        #[cfg(feature = "solana")]
+        return matches!(self, ChainFamily::Solana);
+        #[cfg(not(feature = "solana"))]
+        false
     }
 }
 
@@ -187,12 +208,17 @@ impl ChainSigner for EvmChainSigner {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "solana")]
     #[test]
-    fn chain_family_from_slug() {
+    fn chain_family_from_slug_solana() {
         assert_eq!(
             ChainFamily::from_network_slug("mainnet"),
             ChainFamily::Solana
         );
+    }
+
+    #[test]
+    fn chain_family_from_slug_evm() {
         assert_eq!(
             ChainFamily::from_network_slug("ethereum"),
             ChainFamily::Evm { chain_id: 1 }
@@ -217,6 +243,7 @@ mod tests {
             ChainFamily::from_caip2("eip155:8453"),
             Some(ChainFamily::Evm { chain_id: 8453 })
         );
+        #[cfg(feature = "solana")]
         assert!(
             ChainFamily::from_caip2("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")
                 .unwrap()
@@ -246,9 +273,14 @@ mod tests {
 
     #[test]
     fn chain_family_is_evm_and_is_solana() {
-        assert!(ChainFamily::Solana.is_solana());
-        assert!(!ChainFamily::Solana.is_evm());
+        #[cfg(feature = "solana")]
+        {
+            assert!(ChainFamily::Solana.is_solana());
+            assert!(!ChainFamily::Solana.is_evm());
+        }
         assert!(ChainFamily::Evm { chain_id: 1 }.is_evm());
         assert!(!ChainFamily::Evm { chain_id: 1 }.is_solana());
+        assert!(!ChainFamily::Unknown.is_evm());
+        assert!(!ChainFamily::Unknown.is_solana());
     }
 }
