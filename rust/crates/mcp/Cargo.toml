@@ -4,6 +4,12 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Re-export pay-core's `solana` feature for the MCP curl tool's
+# Mpp/Session/SIWX branches.
+solana = ["pay-core/solana"]
+
 [dependencies]
 pay-core = { workspace = true }
 pay-types = { workspace = true }

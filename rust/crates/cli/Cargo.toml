@@ -15,6 +15,7 @@ default = []
 # include Solana MPP/x402/Session and the Payment Debugger UI.
 solana = [
     "pay-core/solana",
+    "pay-mcp/solana",
     "dep:solana-mpp",
     "dep:solana-pubkey",
     "dep:ed25519-dalek",

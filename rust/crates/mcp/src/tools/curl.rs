@@ -210,6 +210,7 @@ fn do_paid_fetch(
     let account_override = std::env::var("PAY_ACTIVE_ACCOUNT").ok();
 
     match outcome {
+        #[cfg(feature = "solana")]
         RunOutcome::MppChallenge {
             challenge,
             alternatives,
@@ -264,6 +265,7 @@ fn do_paid_fetch(
                 body.as_deref(),
             )?)
         }
+        #[cfg(feature = "solana")]
         RunOutcome::X402SignInChallenge { challenge, .. } => {
             let built_payment = pay_core::client::x402::build_siwx_auth_header(
                 &challenge,
@@ -286,6 +288,7 @@ fn do_paid_fetch(
                 body.as_deref(),
             )?)
         }
+        #[cfg(feature = "solana")]
         RunOutcome::SessionChallenge { .. } => Err(pay_core::Error::Mpp(
             "402 Payment Required (MPP session) — session payments require a stateful client with a Fiber channel".to_string(),
         )),

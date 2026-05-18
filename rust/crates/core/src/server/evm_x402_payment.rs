@@ -33,8 +33,10 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use serde_json::json;
-use solana_mpp::PAYMENT_RECEIPT_HEADER;
-use solana_x402::{PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER, X402_V1_PAYMENT_HEADER};
+use crate::x402_proto::{
+    PAYMENT_RECEIPT_HEADER, PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER,
+    X402_V1_PAYMENT_HEADER,
+};
 
 use std::sync::Arc;
 

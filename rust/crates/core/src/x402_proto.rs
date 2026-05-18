@@ -48,6 +48,12 @@ pub const PAYMENT_RESPONSE_HEADER: &str = X402_V2_PAYMENT_RESPONSE_HEADER;
 /// x402 `exact` scheme identifier.
 pub const EXACT_SCHEME: &str = "exact";
 
+/// Header servers use to advertise a payment receipt back to the client
+/// after settlement. Originally an MPP-only header (`solana_mpp` exports
+/// the same constant); we re-define it here so EVM x402 servers can emit
+/// it without pulling Solana into the build graph.
+pub const PAYMENT_RECEIPT_HEADER: &str = "payment-receipt";
+
 // CAIP-2 Solana cluster identifiers. Kept here as protocol-level strings;
 // they do not depend on the Solana SDK.
 pub const SOLANA_MAINNET: &str = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
